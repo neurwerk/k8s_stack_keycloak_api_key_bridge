@@ -78,18 +78,26 @@ All four checks (Ruff lint and format, ty, and pytest) should pass before commit
 
 ### Releasing
 
-1. Bump `version` in `pyproject.toml`
-2. Commit:
+1. Open a release issue and make the package and lockfile version changes on a
+   dedicated branch.
+2. Run `make check`, then open a pull request that links the release issue and
+   records the results.
+3. After required CI and review complete, obtain explicit authorization and
+   squash-merge the pull request.
+4. After separate release authorization, update local `main`, create the exact
+   tag from the merged commit, and push only that tag:
    ```bash
-   git add -A && git commit -m "chore: bump to v0.x.x"
-   ```
-3. Tag and push:
-   ```bash
+   git switch main
+   git pull --ff-only origin main
    git tag v0.x.x
-   git push origin main --tags
+   git push origin v0.x.x
    ```
-4. GitHub Actions builds and pushes `:0.x.x` and `:0.x` AMD64 images to GHCR
-5. Pin the new version in `base/charts/keycloak-api-key-bridge/`
+5. GitHub Actions builds and pushes `:0.x.x` and `:0.x` AMD64 images to GHCR.
+6. Update the image pin in `base/charts/keycloak-api-key-bridge/` through its
+   own reviewed issue and pull request.
+
+Do not push release preparation directly to `main`, combine the branch push
+with the tag push, or treat merge authorization as release authorization.
 
 ### GitHub Actions
 
