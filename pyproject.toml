@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "keycloak-api-key-bridge"
-version = "0.5.3"
+version = "0.1.0"
 description = "Keycloak-backed API key management and authorization bridge for AgentGateway."
 authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]
 readme = "README.md"
