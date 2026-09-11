@@ -83,8 +83,22 @@ def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> Non
         response = client.get("/validate", headers={"x-api-key": "managed-secret"})
 
     assert response.status_code == 200
-    assert response.json()["principal"] == {"kind": "service_account", "id": "dify-service-account"}
-    assert response.json()["permissions"] == ["llm:invoke"]
+    assert response.json() == {
+        "contract_version": 1,
+        "credential": {
+            "id": "dify-primary",
+            "kind": "managed_api_key",
+            "name": "dify-agentgateway",
+            "expires_at": None,
+        },
+        "principal": {"kind": "service_account", "id": "dify-service-account"},
+        "permissions": ["llm:invoke"],
+    }
+    assert json.loads(response.headers["x-agentgateway-auth-context"]) == {
+        "contract_version": response.json()["contract_version"],
+        "principal_id": response.json()["principal"]["id"],
+        "permissions": response.json()["permissions"],
+    }
 
 
 def test_invalid_managed_verifier_returns_generic_unavailable_error(tmp_path: Path) -> None:
@@ -107,4 +121,5 @@ def test_invalid_managed_verifier_returns_generic_unavailable_error(tmp_path: Pa
         response = client.get("/validate", headers={"x-api-key": "managed-secret"})
 
     assert response.status_code == 503
+    assert "x-agentgateway-auth-context" not in response.headers
     assert response.json() == {"detail": "Managed credential configuration unavailable"}

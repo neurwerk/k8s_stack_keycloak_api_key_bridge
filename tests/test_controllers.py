@@ -1,6 +1,7 @@
 """Controller tests for JWT authentication and authorization decisions."""
 
 import base64
+import json
 import time
 from collections.abc import Generator
 from unittest.mock import ANY
@@ -268,6 +269,7 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
         },
     )
     assert created.status_code == 200, created.text
+    assert "x-agentgateway-auth-context" not in created.headers
     key = created.json()["api_key"]
 
     validated = client.get("/validate", headers={"x-api-key": key})
@@ -291,6 +293,68 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
     assert restricted.status_code == 200
     assert restricted.json()["permissions"] == ["llm:invoke"]
 
+    client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(frozenset())
+    empty = client.post("/validate", headers={"Authorization": f"Bearer {key}"})
+    assert empty.status_code == 200
+    assert empty.json()["permissions"] == []
+    for response in (validated, restricted, empty):
+        body = response.json()
+        assert response.content == json.dumps(
+            body, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        assert response.headers["x-agentgateway-auth-context"] == json.dumps(
+            {
+                "contract_version": body["contract_version"],
+                "principal_id": body["principal"]["id"],
+                "permissions": body["permissions"],
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+
+    # Exercise the actual serialized-byte boundary, including escaped identity text.
+    principal_prefix = 'user-\u00e9\U0001f600\r\n"\\'
+    overhead = len(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "principal_id": principal_prefix,
+                "permissions": ["llm:invoke"],
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+    )
+    for size in (65535, 65536, 65537):
+        principal_id = principal_prefix + "a" * (size - overhead)
+        client.app.state.kc_client.entitlements[principal_id] = PrincipalEntitlements(
+            frozenset({"llm:invoke"})
+        )
+        with client.app.state.db_factory() as session:
+            _, boundary_key = ApiKey.create_key(
+                session,
+                name="boundary",
+                user_id=principal_id,
+                permissions=["llm:invoke"],
+                validity_days=1,
+            )
+        response = client.get("/validate", headers={"x-api-key": boundary_key})
+        if size > 65536:
+            assert response.status_code == 503
+            assert response.json() == {"detail": "Authorization context unavailable"}
+            assert "x-agentgateway-auth-context" not in response.headers
+        else:
+            assert response.status_code == 200
+            header = response.headers["x-agentgateway-auth-context"]
+            assert len(header.encode("ascii")) == size
+            assert all(32 <= ord(char) < 127 for char in header)
+            assert json.loads(header) == {
+                "contract_version": 1,
+                "principal_id": principal_id,
+                "permissions": response.json()["permissions"],
+            }
+            assert response.json()["principal"]["id"] == principal_id
+
 
 def test_create_rejects_permissions_not_in_live_entitlements(client: TestClient) -> None:
     response = client.post(
@@ -307,11 +371,19 @@ def test_validate_uses_401_for_disabled_principal_and_503_for_keycloak_outage(
         "/api_keys", json={"name": "cli", "permissions": ["llm:invoke"], "expires_in_days": 30}
     )
     key = created.json()["api_key"]
+    for headers in ({}, {"x-api-key": "unknown-key"}):
+        response = client.get("/validate", headers=headers)
+        assert response.status_code == 401
+        assert "x-agentgateway-auth-context" not in response.headers
     client.app.state.kc_client.entitlements["user-a"] = None
-    assert client.get("/validate", headers={"x-api-key": key}).status_code == 401
+    response = client.get("/validate", headers={"x-api-key": key})
+    assert response.status_code == 401
+    assert "x-agentgateway-auth-context" not in response.headers
 
     client.app.state.kc_client.failure = True
-    assert client.get("/validate", headers={"x-api-key": key}).status_code == 503
+    response = client.get("/validate", headers={"x-api-key": key})
+    assert response.status_code == 503
+    assert "x-agentgateway-auth-context" not in response.headers
 
 
 def test_studio_administrator_token_can_manage_a_target_users_subset(

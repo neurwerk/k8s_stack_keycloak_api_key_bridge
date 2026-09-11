@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -375,7 +376,15 @@ def _decision_response(
     principal_id: str,
     permissions: list[str],
 ) -> JSONResponse:
-    """Return the stable body consumed as AgentGateway extAuth metadata."""
+    """Return the stable decision body and bounded trusted gateway projection."""
+    auth_context = json.dumps(
+        {"contract_version": 1, "principal_id": principal_id, "permissions": permissions},
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    # ASCII serialization makes character count equal the header value's byte size.
+    if len(auth_context) > 64 * 1024:
+        raise HTTPException(status_code=503, detail="Authorization context unavailable")
     return JSONResponse(
         {
             "contract_version": 1,
@@ -387,7 +396,8 @@ def _decision_response(
             },
             "principal": {"kind": principal_kind, "id": principal_id},
             "permissions": permissions,
-        }
+        },
+        headers={"x-agentgateway-auth-context": auth_context},
     )
 
 
