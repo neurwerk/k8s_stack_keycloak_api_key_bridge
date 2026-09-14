@@ -128,6 +128,8 @@ def test_keycloak_client_caches_current_entitlements() -> None:
             return httpx.Response(200, json=[{"id": "agentgateway-id"}])
         if request.url.path.endswith("/composite"):
             return httpx.Response(200, json=[{"name": "llm:invoke"}, {"name": "ignored"}])
+        if request.url.path.endswith("/groups"):
+            return httpx.Response(200, json=[{"path": "/team"}])
         raise AssertionError(request.url)
 
     http_client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -140,6 +142,7 @@ def test_keycloak_client_caches_current_entitlements() -> None:
     assert second is not None
     assert first.permissions == frozenset({"llm:invoke"})
     assert second.permissions == frozenset({"llm:invoke"})
+    assert first.groups == second.groups == frozenset({"/team"})
     assert sum(url.endswith("/users/user-1") for url in calls) == 1
     client.close()
 
@@ -157,6 +160,8 @@ def test_keycloak_client_discards_entitlements_when_marked_unavailable() -> None
             return httpx.Response(200, json=[{"id": "agentgateway-id"}])
         if request.url.path.endswith("/composite"):
             return httpx.Response(200, json=[{"name": "llm:invoke"}])
+        if request.url.path.endswith("/groups"):
+            return httpx.Response(200, json=[])
         raise AssertionError(request.url)
 
     http_client = httpx.Client(transport=httpx.MockTransport(handler))

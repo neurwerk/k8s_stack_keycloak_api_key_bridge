@@ -326,6 +326,7 @@ def validate_key(
         principal_kind="user",
         principal_id=key["user_id"],
         permissions=permissions,
+        groups=sorted(entitlements.groups),
     )
 
 
@@ -363,6 +364,7 @@ def _managed_key_response(
         principal_kind="service_account",
         principal_id=principal_id,
         permissions=permissions,
+        groups=sorted(entitlements.groups),
     )
 
 
@@ -375,10 +377,16 @@ def _decision_response(
     principal_kind: str,
     principal_id: str,
     permissions: list[str],
+    groups: list[str],
 ) -> JSONResponse:
     """Return the stable decision body and bounded trusted gateway projection."""
     auth_context = json.dumps(
-        {"contract_version": 1, "principal_id": principal_id, "permissions": permissions},
+        {
+            "contract_version": 1,
+            "principal_id": principal_id,
+            "permissions": permissions,
+            "groups": groups,
+        },
         ensure_ascii=True,
         separators=(",", ":"),
     )
@@ -396,6 +404,7 @@ def _decision_response(
             },
             "principal": {"kind": principal_kind, "id": principal_id},
             "permissions": permissions,
+            "groups": groups,
         },
         headers={"x-agentgateway-auth-context": auth_context},
     )
