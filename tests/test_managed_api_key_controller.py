@@ -32,7 +32,7 @@ class FakeKeycloakClient:
     def get_principal_entitlements(self, principal_id: str) -> PrincipalEntitlements | None:
         if principal_id != "dify-service-account":
             return None
-        return PrincipalEntitlements(frozenset({"llm:invoke"}))
+        return PrincipalEntitlements(frozenset({"llm:invoke"}), frozenset())
 
 
 class AvailableJWKSCache:
@@ -93,11 +93,13 @@ def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> Non
         },
         "principal": {"kind": "service_account", "id": "dify-service-account"},
         "permissions": ["llm:invoke"],
+        "groups": [],
     }
     assert json.loads(response.headers["x-agentgateway-auth-context"]) == {
         "contract_version": response.json()["contract_version"],
         "principal_id": response.json()["principal"]["id"],
         "permissions": response.json()["permissions"],
+        "groups": [],
     }
 
 

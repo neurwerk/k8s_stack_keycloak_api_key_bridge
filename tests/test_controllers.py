@@ -6,6 +6,7 @@ import time
 from collections.abc import Generator
 from unittest.mock import ANY
 
+import httpx
 import prometheus_client
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -16,6 +17,7 @@ from keycloak_api_key_bridge.config.database import ApiKey
 from keycloak_api_key_bridge.config.settings import AuthInfo
 from keycloak_api_key_bridge.controllers.api_keys import CurrentUser, get_current_user
 from keycloak_api_key_bridge.lib.keycloak import (
+    KeycloakClient,
     KeycloakUnavailableError,
     PrincipalEntitlements,
 )
@@ -111,8 +113,10 @@ class FakeKeycloakClient:
 
     def __init__(self) -> None:
         self.entitlements: dict[str, PrincipalEntitlements | None] = {
-            "user-a": PrincipalEntitlements(frozenset({"llm:invoke", "mcp:brave:invoke"})),
-            "user-b": PrincipalEntitlements(frozenset({"llm:invoke"})),
+            "user-a": PrincipalEntitlements(
+                frozenset({"llm:invoke", "mcp:brave:invoke"}), frozenset({"/team"})
+            ),
+            "user-b": PrincipalEntitlements(frozenset({"llm:invoke"}), frozenset()),
         }
         self.failure = False
         self.unavailable_calls = 0
@@ -284,16 +288,19 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
         },
         "principal": {"kind": "user", "id": "user-a"},
         "permissions": ["llm:invoke", "mcp:brave:invoke"],
+        "groups": ["/team"],
     }
 
     client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
-        frozenset({"llm:invoke"})
+        frozenset({"llm:invoke"}), frozenset()
     )
     restricted = client.get("/validate", headers={"x-api-key": key})
     assert restricted.status_code == 200
     assert restricted.json()["permissions"] == ["llm:invoke"]
 
-    client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(frozenset())
+    client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
+        frozenset(), frozenset()
+    )
     empty = client.post("/validate", headers={"Authorization": f"Bearer {key}"})
     assert empty.status_code == 200
     assert empty.json()["permissions"] == []
@@ -307,6 +314,7 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
                 "contract_version": body["contract_version"],
                 "principal_id": body["principal"]["id"],
                 "permissions": body["permissions"],
+                "groups": body["groups"],
             },
             ensure_ascii=True,
             separators=(",", ":"),
@@ -320,6 +328,7 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
                 "contract_version": 1,
                 "principal_id": principal_prefix,
                 "permissions": ["llm:invoke"],
+                "groups": [],
             },
             ensure_ascii=True,
             separators=(",", ":"),
@@ -328,7 +337,7 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
     for size in (65535, 65536, 65537):
         principal_id = principal_prefix + "a" * (size - overhead)
         client.app.state.kc_client.entitlements[principal_id] = PrincipalEntitlements(
-            frozenset({"llm:invoke"})
+            frozenset({"llm:invoke"}), frozenset()
         )
         with client.app.state.db_factory() as session:
             _, boundary_key = ApiKey.create_key(
@@ -352,8 +361,46 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
                 "contract_version": 1,
                 "principal_id": principal_id,
                 "permissions": response.json()["permissions"],
+                "groups": [],
             }
             assert response.json()["principal"]["id"] == principal_id
+
+
+def test_validate_returns_current_keycloak_groups(client: TestClient) -> None:
+    groups = [{"path": f"/teams/team-{index}"} for index in range(101)]
+    pages: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            return httpx.Response(200, json={"access_token": _management_token()})
+        if request.url.path.endswith("/users/user-a"):
+            return httpx.Response(200, json={"enabled": True})
+        if request.url.path.endswith("/clients"):
+            return httpx.Response(200, json=[{"id": "agentgateway-id"}])
+        if request.url.path.endswith("/composite"):
+            return httpx.Response(200, json=[{"name": "llm:invoke"}])
+        if request.url.path.endswith("/users/user-a/groups"):
+            first = int(request.url.params["first"])
+            pages.append(first)
+            return httpx.Response(200, json=groups[first : first + int(request.url.params["max"])])
+        raise AssertionError(request.url)
+
+    with client.app.state.db_factory() as session:
+        _, key = ApiKey.create_key(
+            session, name="groups", user_id="user-a", permissions=["llm:invoke"], validity_days=1
+        )
+    client.app.state.kc_client = KeycloakClient(
+        AuthInfo(_KEYCLOAK_URL, "test", "bridge", "test-secret"),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    response = client.get("/validate", headers={"x-api-key": key})
+    assert response.status_code == 200, response.text
+    assert pages == [0, 100]
+    assert response.json()["groups"] == sorted(group["path"] for group in groups)
+    context = json.loads(response.headers["x-agentgateway-auth-context"])
+    assert context["groups"] == response.json()["groups"]
+    assert context["principal_id"] == "user-a"
+    assert context["permissions"] == ["llm:invoke"]
 
 
 def test_create_rejects_permissions_not_in_live_entitlements(client: TestClient) -> None:
@@ -510,7 +557,7 @@ def test_permissions_returns_only_sorted_current_agentgateway_permissions(
     client: TestClient,
 ) -> None:
     client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
-        frozenset({"mcp:brave:invoke", "not-a-permission", "llm:invoke"})
+        frozenset({"mcp:brave:invoke", "not-a-permission", "llm:invoke"}), frozenset()
     )
 
     response = client.get("/permissions")

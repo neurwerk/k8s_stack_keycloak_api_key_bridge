@@ -23,9 +23,10 @@ class KeycloakUnavailableError(RuntimeError):
 
 @dataclass(frozen=True)
 class PrincipalEntitlements:
-    """The current AgentGateway permissions of an enabled Keycloak principal."""
+    """Current AgentGateway permissions and group paths of an enabled principal."""
 
     permissions: frozenset[str]
+    groups: frozenset[str]
 
 
 class KeycloakClient:
@@ -167,7 +168,30 @@ class KeycloakClient:
             and isinstance(role.get("name"), str)
             and is_valid_permission(role["name"])
         )
-        return PrincipalEntitlements(permissions=permissions)
+        groups: set[str] = set()
+        first = 0
+        while True:
+            try:
+                response = self._client.get(
+                    f"{self._base}/users/{principal_id}/groups",
+                    params={"first": first, "max": 100, "briefRepresentation": "true"},
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+                memberships = response.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                raise KeycloakUnavailableError("could not resolve Keycloak groups") from exc
+            if not isinstance(memberships, list):
+                raise KeycloakUnavailableError("Keycloak group response is not a list")
+            for group in memberships:
+                path = group.get("path") if isinstance(group, dict) else None
+                if not isinstance(path, str) or not path.startswith("/") or len(path) <= 1:
+                    raise KeycloakUnavailableError("Keycloak group has no full path")
+                groups.add(path)
+            if len(memberships) < 100:
+                break
+            first += len(memberships)
+        return PrincipalEntitlements(permissions=permissions, groups=frozenset(groups))
 
     def _get_user(self, user_id: str) -> dict | None:
         try:
