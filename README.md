@@ -26,7 +26,8 @@ immutable, and validation intersects each grant with the principal's current
 Management JWTs must target the configured bridge client and use the configured
 issuer. A user with the Keycloak realm role `api-key-admin` may manage another
 user's keys. API keys can be supplied to `/validate` through `x-api-key` or a
-bearer authorization header.
+bearer authorization header. Validation failures retain their `detail` and also
+return the message as `error.message` for OpenAI-compatible clients.
 
 ## Requirements
 

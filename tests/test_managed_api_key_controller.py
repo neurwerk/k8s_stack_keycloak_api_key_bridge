@@ -124,4 +124,7 @@ def test_invalid_managed_verifier_returns_generic_unavailable_error(tmp_path: Pa
 
     assert response.status_code == 503
     assert "x-agentgateway-auth-context" not in response.headers
-    assert response.json() == {"detail": "Managed credential configuration unavailable"}
+    assert response.json() == {
+        "detail": "Managed credential configuration unavailable",
+        "error": {"message": "Managed credential configuration unavailable"},
+    }

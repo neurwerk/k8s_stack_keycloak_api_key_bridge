@@ -350,7 +350,10 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
         response = client.get("/validate", headers={"x-api-key": boundary_key})
         if size > 65536:
             assert response.status_code == 503
-            assert response.json() == {"detail": "Authorization context unavailable"}
+            assert response.json() == {
+                "detail": "Authorization context unavailable",
+                "error": {"message": "Authorization context unavailable"},
+            }
             assert "x-agentgateway-auth-context" not in response.headers
         else:
             assert response.status_code == 200
@@ -418,18 +421,30 @@ def test_validate_uses_401_for_disabled_principal_and_503_for_keycloak_outage(
         "/api_keys", json={"name": "cli", "permissions": ["llm:invoke"], "expires_in_days": 30}
     )
     key = created.json()["api_key"]
-    for headers in ({}, {"x-api-key": "unknown-key"}):
-        response = client.get("/validate", headers=headers)
+    for method, headers, detail in (
+        ("GET", {}, "An API key must be passed as a header"),
+        ("POST", {"x-api-key": "unknown-key"}, "Invalid or expired key"),
+    ):
+        response = client.request(method, "/validate", headers=headers)
         assert response.status_code == 401
+        assert response.json() == {"detail": detail, "error": {"message": detail}}
         assert "x-agentgateway-auth-context" not in response.headers
     client.app.state.kc_client.entitlements["user-a"] = None
     response = client.get("/validate", headers={"x-api-key": key})
     assert response.status_code == 401
+    assert response.json() == {
+        "detail": "Keycloak principal is unavailable",
+        "error": {"message": "Keycloak principal is unavailable"},
+    }
     assert "x-agentgateway-auth-context" not in response.headers
 
     client.app.state.kc_client.failure = True
     response = client.get("/validate", headers={"x-api-key": key})
     assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Keycloak authorization unavailable",
+        "error": {"message": "Keycloak authorization unavailable"},
+    }
     assert "x-agentgateway-auth-context" not in response.headers
 
 

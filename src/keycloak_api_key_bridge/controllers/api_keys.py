@@ -289,6 +289,23 @@ def validate_key(
     managed_api_keys: ManagedApiKeyValidator = Depends(get_managed_api_keys),
 ) -> JSONResponse:
     """Validate a credential and return a versioned trusted authorization decision."""
+    try:
+        return _validate_key(request, x_api_key, db, kc, managed_api_keys)
+    except HTTPException as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail, "error": {"message": str(exc.detail)}},
+            headers=exc.headers,
+        )
+
+
+def _validate_key(
+    request: Request,
+    x_api_key: str | None,
+    db: Session,
+    kc: KeycloakClient | None,
+    managed_api_keys: ManagedApiKeyValidator,
+) -> JSONResponse:
     cache = request.app.state.jwks_cache
     if not request.app.state.keycloak_configured or cache is None or not cache.is_available():
         raise HTTPException(status_code=503, detail="Keycloak authorization unavailable")
