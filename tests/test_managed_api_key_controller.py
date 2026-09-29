@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import uuid
 from collections.abc import Generator
 from pathlib import Path
 
@@ -69,11 +70,11 @@ def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> Non
     write_grant(grant)
     verifier.write_text(hashlib.sha256(b"managed-secret").hexdigest(), encoding="utf-8")
     app = create_app(
+        database_url="sqlite://",
         settings=Settings(
-            database_url="sqlite://",
             managed_primary_grant_file=str(grant),
             managed_primary_verifier_file=str(verifier),
-        )
+        ),
     )
     app.state.auth_info = AuthInfo("", "", "", "")
     app.state.kc_client = FakeKeycloakClient()
@@ -81,6 +82,7 @@ def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> Non
     app.state.jwks_cache = AvailableJWKSCache()
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.get("/validate", headers={"x-api-key": "managed-secret"})
+        repeated = client.post("/validate", headers={"Authorization": "Bearer managed-secret"})
 
     assert response.status_code == 200
     assert response.json() == {
@@ -95,12 +97,25 @@ def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> Non
         "permissions": ["llm:invoke"],
         "groups": [],
     }
+    expected_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL, "keycloak-api-key-bridge/managed/dify-agentgateway/dify-primary"
+        )
+    )
     assert json.loads(response.headers["x-agentgateway-auth-context"]) == {
         "contract_version": response.json()["contract_version"],
         "principal_id": response.json()["principal"]["id"],
         "permissions": response.json()["permissions"],
         "groups": [],
+        "credential_id": expected_id,
+        "credential_kind": "managed",
     }
+    assert repeated.status_code == 200
+    assert (
+        repeated.headers["x-agentgateway-auth-context"]
+        == response.headers["x-agentgateway-auth-context"]
+    )
+    assert "managed-secret" not in response.headers["x-agentgateway-auth-context"]
 
 
 def test_invalid_managed_verifier_returns_generic_unavailable_error(tmp_path: Path) -> None:
@@ -109,11 +124,11 @@ def test_invalid_managed_verifier_returns_generic_unavailable_error(tmp_path: Pa
     write_grant(grant)
     verifier.write_text("invalid", encoding="utf-8")
     app = create_app(
+        database_url="sqlite://",
         settings=Settings(
-            database_url="sqlite://",
             managed_primary_grant_file=str(grant),
             managed_primary_verifier_file=str(verifier),
-        )
+        ),
     )
     app.state.auth_info = AuthInfo("", "", "", "")
     app.state.kc_client = FakeKeycloakClient()

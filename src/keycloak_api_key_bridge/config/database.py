@@ -1,9 +1,25 @@
 import hashlib
 import secrets
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import JSON, Boolean, DateTime, Engine, String, create_engine, func, inspect, select
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Connection,
+    DateTime,
+    Engine,
+    String,
+    create_engine,
+    func,
+    insert,
+    inspect,
+    select,
+    text,
+)
+from sqlalchemy.engine import URL
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -20,7 +36,7 @@ class DatabaseSchemaError(RuntimeError):
     """Raised when a database is not the bridge's explicitly supported schema."""
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _SCHEMA_VERSION_TABLE = "bridge_schema_version"
 _EXPECTED_TABLES = frozenset({"api_keys", _SCHEMA_VERSION_TABLE})
 _EXPECTED_API_KEY_COLUMNS = frozenset(
@@ -40,7 +56,7 @@ _EXPECTED_API_KEY_COLUMNS = frozenset(
 
 
 class SchemaVersion(Base):
-    """Singleton marker that identifies the SQLite schema expected by this bridge."""
+    """Singleton marker that identifies the PostgreSQL schema expected by this bridge."""
 
     __tablename__ = _SCHEMA_VERSION_TABLE
 
@@ -77,9 +93,14 @@ class ApiKey(Base):
         Permission grants are immutable. *created_by_user_id*, when set, records
         an administrator creating a key on behalf of another user.
         """
-        # The immediate transaction serializes quota checks across worker threads.
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
         try:
+            if session.bind is not None and session.bind.dialect.name == "postgresql":
+                # Transaction-scoped lock works across pods and also for users with no rows.
+                # Hash collisions only serialize unrelated users; they cannot bypass quota.
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:user_id, 0))"),
+                    {"user_id": user_id},
+                )
             stored_key_count = session.scalar(
                 select(func.count()).select_from(cls).where(cls.user_id == user_id)
             )
@@ -188,27 +209,49 @@ def _hash_key(key_value: str) -> str:
     return hashlib.sha256(key_value.encode()).hexdigest()
 
 
-def create_engine_and_session_factory(database_url: str) -> tuple[Engine, sessionmaker[Session]]:
-    """Return a configured ``(engine, sessionmaker)`` tuple bound to *database_url*."""
+def create_engine_and_session_factory(
+    database_url: URL | str, *, allow_sqlite_for_tests: bool = False
+) -> tuple[Engine, sessionmaker[Session]]:
+    """Connect to an initialized database; never create schema during service startup."""
+    driver = (
+        database_url.drivername if isinstance(database_url, URL) else database_url.split(":", 1)[0]
+    )
+    if driver != "postgresql+psycopg" and not (
+        allow_sqlite_for_tests and database_url == "sqlite://"
+    ):
+        raise ValueError("PostgreSQL (psycopg) is required for production API-key storage")
     connect_args: dict = {}
-    if database_url.startswith("sqlite"):
-        # Allow SQLite connections from multiple threads (uvicorn --workers).
+    if driver == "sqlite":
         connect_args["check_same_thread"] = False
+    else:
+        connect_args["connect_timeout"] = 3
 
     engine_options: dict = {}
-    if database_url in {"sqlite://", "sqlite:///:memory:"}:
-        # TestClient serves requests on another thread. A static pool keeps an
-        # in-memory database shared by application setup and request sessions.
+    if driver == "sqlite" and database_url in {"sqlite://", "sqlite:///:memory:"}:
         engine_options["poolclass"] = StaticPool
 
     engine = create_engine(
         database_url,
         connect_args=connect_args,
         pool_pre_ping=True,
+        **({"pool_size": 5, "max_overflow": 0, "pool_timeout": 2} if driver != "sqlite" else {}),
         **engine_options,
     )
     try:
-        _initialize_schema(engine)
+        if driver == "sqlite":
+            # Isolated, opt-in in-memory fixtures only; never used by production.
+            Base.metadata.create_all(engine)
+            with Session(engine) as session:
+                session.add(SchemaVersion(version=SCHEMA_VERSION))
+                session.commit()
+        for attempt in range(3):
+            try:
+                _verify_schema(engine)
+                break
+            except OperationalError:
+                if attempt == 2:
+                    raise
+                time.sleep(1)
     except Exception:
         engine.dispose()
         raise
@@ -216,37 +259,80 @@ def create_engine_and_session_factory(database_url: str) -> tuple[Engine, sessio
     return engine, sessionmaker(bind=engine)
 
 
-def _initialize_schema(engine: Engine) -> None:
-    """Create a fresh schema or reject every unversioned/incompatible database.
-
-    The chart deliberately provisions a fresh schema-v2 PVC rather than
-    migrating the pre-versioned bridge database. A manually attached database
-    must prove that it is this exact schema before it can serve credentials.
-    """
+def _verify_schema(engine: Engine | Connection) -> None:
+    """Fail closed on missing or incompatible tables, version, or key constraints."""
     inspector = inspect(engine)
     tables = set(inspector.get_table_names()) - {"sqlite_sequence"}
-    if not tables:
-        Base.metadata.create_all(engine)
-        with Session(engine) as session:
-            session.add(SchemaVersion(version=SCHEMA_VERSION))
-            session.commit()
-        return
-
     if tables != _EXPECTED_TABLES:
         raise DatabaseSchemaError(
-            "Unsupported API-key database schema; use a new schema-v2 volume instead of reusing it"
+            "Missing or incompatible API-key schema; bootstrap an empty database"
         )
 
     api_key_columns = {column["name"] for column in inspector.get_columns(ApiKey.__tablename__)}
     version_columns = {column["name"] for column in inspector.get_columns(_SCHEMA_VERSION_TABLE)}
     if api_key_columns != _EXPECTED_API_KEY_COLUMNS or version_columns != {"version"}:
-        raise DatabaseSchemaError(
-            "Unsupported API-key database schema; use a new schema-v2 volume instead of reusing it"
-        )
+        raise DatabaseSchemaError("Incompatible API-key schema columns")
+
+    if engine.dialect.name == "postgresql":
+        columns = {column["name"]: column for column in inspector.get_columns("api_keys")}
+        version_column = inspector.get_columns(_SCHEMA_VERSION_TABLE)[0]
+        version_pk = inspector.get_pk_constraint(_SCHEMA_VERSION_TABLE)["constrained_columns"]
+        if (
+            version_column["type"].compile(dialect=engine.dialect) != "INTEGER"
+            or version_column["nullable"]
+            or version_pk != ["version"]
+        ):
+            raise DatabaseSchemaError("Incompatible API-key schema version table")
+        for name, model_column in ApiKey.__table__.columns.items():
+            actual = columns[name]
+            if (
+                actual["type"].compile(dialect=engine.dialect)
+                != model_column.type.compile(dialect=engine.dialect)
+                or actual["nullable"] != model_column.nullable
+            ):
+                raise DatabaseSchemaError("Incompatible API-key schema column types or nullability")
+        pk = inspector.get_pk_constraint("api_keys")["constrained_columns"]
+        unique = inspector.get_unique_constraints("api_keys")
+        indexes = inspector.get_indexes("api_keys")
+        if (
+            pk != ["id"]
+            or not any(item["column_names"] == ["key_hash"] for item in unique)
+            or not any(item["column_names"] == ["user_id"] for item in indexes)
+        ):
+            raise DatabaseSchemaError("Incompatible API-key schema constraints")
 
     with Session(engine) as session:
         versions = list(session.scalars(select(SchemaVersion.version)))
     if versions != [SCHEMA_VERSION]:
-        raise DatabaseSchemaError(
-            "Unsupported API-key database schema version; use a new schema-v2 volume instead"
-        )
+        raise DatabaseSchemaError("Incompatible API-key schema version")
+
+
+def bootstrap_schema(database_url: URL) -> None:
+    """Initialize an empty database or verify its exact existing schema."""
+    if database_url.drivername != "postgresql+psycopg":
+        raise ValueError("PostgreSQL (psycopg) is required")
+    engine = create_engine(
+        database_url,
+        connect_args={"connect_timeout": 3},
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=2,
+    )
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("SELECT pg_advisory_xact_lock(573214, 1)"))
+            if inspect(connection).get_table_names():
+                _verify_schema(connection)
+            else:
+                Base.metadata.create_all(connection)
+                connection.execute(insert(SchemaVersion).values(version=SCHEMA_VERSION))
+                _verify_schema(connection)
+    finally:
+        engine.dispose()
+
+
+def bootstrap_main() -> None:
+    """Initialize or verify the dedicated bridge-owned database."""
+    from keycloak_api_key_bridge.config.settings import Settings
+
+    bootstrap_schema(Settings().postgres_url())

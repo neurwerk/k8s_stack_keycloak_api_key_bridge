@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
 from typing import Annotated
@@ -376,6 +377,12 @@ def _managed_key_response(
     return _decision_response(
         credential_id=managed_key.key_id,
         credential_kind="managed_api_key",
+        context_credential_id=str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"keycloak-api-key-bridge/managed/{managed_key.principal_client_id}/{managed_key.key_id}",
+            )
+        ),
         credential_name=managed_key.name,
         expires_at=None,
         principal_kind="service_account",
@@ -389,6 +396,7 @@ def _decision_response(
     *,
     credential_id: str,
     credential_kind: str,
+    context_credential_id: str | None = None,
     credential_name: str,
     expires_at: str | None,
     principal_kind: str,
@@ -403,6 +411,8 @@ def _decision_response(
             "principal_id": principal_id,
             "permissions": permissions,
             "groups": groups,
+            "credential_id": context_credential_id or credential_id,
+            "credential_kind": "personal" if credential_kind == "user_api_key" else "managed",
         },
         ensure_ascii=True,
         separators=(",", ":"),
