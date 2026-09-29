@@ -3,6 +3,7 @@
 import base64
 import json
 import time
+import uuid
 from collections.abc import Generator
 from unittest.mock import ANY
 
@@ -290,6 +291,8 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
         "permissions": ["llm:invoke", "mcp:brave:invoke"],
         "groups": ["/team"],
     }
+    assert str(uuid.UUID(created.json()["id"])) == created.json()["id"]
+    assert key not in validated.headers["x-agentgateway-auth-context"]
 
     client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
         frozenset({"llm:invoke"}), frozenset()
@@ -315,6 +318,8 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
                 "principal_id": body["principal"]["id"],
                 "permissions": body["permissions"],
                 "groups": body["groups"],
+                "credential_id": body["credential"]["id"],
+                "credential_kind": "personal",
             },
             ensure_ascii=True,
             separators=(",", ":"),
@@ -329,6 +334,8 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
                 "principal_id": principal_prefix,
                 "permissions": ["llm:invoke"],
                 "groups": [],
+                "credential_id": str(uuid.UUID(int=0)),
+                "credential_kind": "personal",
             },
             ensure_ascii=True,
             separators=(",", ":"),
@@ -365,6 +372,8 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
                 "principal_id": principal_id,
                 "permissions": response.json()["permissions"],
                 "groups": [],
+                "credential_id": response.json()["credential"]["id"],
+                "credential_kind": "personal",
             }
             assert response.json()["principal"]["id"] == principal_id
 

@@ -24,9 +24,7 @@ ENV PATH=/app/.venv/bin:$PATH \
 
 RUN groupadd --system --gid 1000 app \
     && useradd --system --uid 1000 --gid app --home-dir /app --no-create-home \
-        --shell /usr/sbin/nologin appuser \
-    && mkdir -p /app/data \
-    && chown appuser:app /app/data
+        --shell /usr/sbin/nologin appuser
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 

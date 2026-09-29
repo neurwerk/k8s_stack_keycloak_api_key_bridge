@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,11 @@ class Settings(BaseSettings):
     entitlement_cache_ttl_seconds: int = Field(default=30, ge=1, le=300)
     negative_entitlement_cache_ttl_seconds: int = Field(default=5, ge=1, le=60)
 
-    database_url: str = "sqlite:///data/api_keys.db"
+    postgres_host: str = ""
+    postgres_port: int = Field(default=5432, ge=1, le=65535)
+    postgres_database: str = "api_key_bridge"
+    postgres_user: str = "api_key_bridge"
+    postgres_password: str = ""
     max_keys_per_user: int = Field(default=20, ge=1, le=100)
 
     managed_primary_grant_file: str = ""
@@ -55,6 +60,21 @@ class Settings(BaseSettings):
     port: int = 8000
 
     log_level: str = "info"
+
+    def postgres_url(self) -> URL:
+        """Build a driver URL without interpolating or logging the password."""
+        if not all(
+            (self.postgres_host, self.postgres_database, self.postgres_user, self.postgres_password)
+        ):
+            raise ValueError("PostgreSQL host, database, user and password are required")
+        return URL.create(
+            "postgresql+psycopg",
+            username=self.postgres_user,
+            password=self.postgres_password,
+            host=self.postgres_host,
+            port=self.postgres_port,
+            database=self.postgres_database,
+        )
 
 
 def build_auth_info(settings: Settings) -> AuthInfo:

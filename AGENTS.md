@@ -1,6 +1,6 @@
 # keycloak_api_key_bridge
 
-REST API to create and manage API keys backed by SQLite, with Keycloak auth
+REST API to create and manage API keys backed by PostgreSQL, with Keycloak auth
 verification. Minimal surface: no dashboard or deploy directory.
 
 ## What it does
@@ -48,7 +48,7 @@ uv run --frozen ruff format --check .
 # Run type checking
 uv run --frozen ty check
 
-# Run tests (in-memory SQLite)
+# Run tests (in-memory SQLite fixtures; optional disposable local PostgreSQL integration)
 uv run --frozen pytest -v
 ```
 
@@ -66,9 +66,10 @@ All four checks (Ruff lint and format, ty, and pytest) should pass before commit
   with the `api-key-admin` realm role.
 - API keys support create, list, and revoke only. Grants and expiry cannot be
   changed or renewed.
-- SQLite uses schema version 2. The chart provisions
-  `auth-keycloak-api-key-bridge-v2-pvc`; an unversioned or incompatible manually
-  attached database fails startup rather than being created over or migrated.
+- PostgreSQL uses schema version 3 in the dedicated `api_key_bridge` database.
+  Bootstrap an empty database with `keycloak-api-key-bridge-init-db` before
+  starting the service. Missing or incompatible schemas fail startup; no
+  SQLite/PVC import or migration is supported.
 
 ## Building and pushing
 

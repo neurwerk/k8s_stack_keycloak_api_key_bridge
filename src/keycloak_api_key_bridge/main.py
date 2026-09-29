@@ -23,8 +23,7 @@ logger = logging.getLogger(__name__)
 def create_app(database_url: str | None = None, settings: Settings | None = None) -> FastAPI:
     """Build and configure the FastAPI application.
 
-    *database_url*, when provided, overrides the ``DATABASE_URL`` setting
-    (useful for in-memory SQLite during tests).
+    *database_url* is an explicit in-memory SQLite override for tests only.
     """
     settings = settings or Settings()
     logging.basicConfig(
@@ -59,8 +58,16 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         lifespan=_lifespan,
     )
 
-    db_url = database_url if database_url is not None else settings.database_url
-    app.state.db_engine, app.state.db_factory = create_engine_and_session_factory(db_url)
+    if database_url is not None:
+        if database_url != "sqlite://":
+            raise ValueError("Only in-memory SQLite is supported as a test override")
+        app.state.db_engine, app.state.db_factory = create_engine_and_session_factory(
+            database_url, allow_sqlite_for_tests=True
+        )
+    else:
+        app.state.db_engine, app.state.db_factory = create_engine_and_session_factory(
+            settings.postgres_url()
+        )
     app.state.auth_info = build_auth_info(settings)
     app.state.max_keys_per_user = settings.max_keys_per_user
     app.state.managed_api_keys = ManagedApiKeyValidator(
