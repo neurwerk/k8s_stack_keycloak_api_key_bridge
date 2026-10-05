@@ -104,6 +104,12 @@ def test_validator_accepts_multiple_registrations_during_rotation(tmp_path: Path
     assert validator.match("new-key") is not None
     assert validator.match("third-key") is not None
 
+    write_verifier(secondary_verifier, "old-key")
+    with pytest.raises(ManagedApiKeyConfigurationError, match="duplicate active managed verifiers"):
+        validator.match("old-key")
+    with pytest.raises(ManagedApiKeyConfigurationError, match="duplicate active managed verifiers"):
+        validator.match("unrelated-key")
+
     secondary_verifier.write_text("", encoding="utf-8")
     assert validator.match("old-key") is not None
     assert validator.match("new-key") is None

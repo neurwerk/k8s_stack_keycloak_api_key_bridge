@@ -66,8 +66,9 @@ key verifiers in a secret manager or Secret volume, never in Git.
 bridge can run without managed keys. Each grant keeps the version-2 format.
 All listed files are reloaded on each validation request; unreadable or invalid
 registrations fail validation closed. An empty verifier disables its registration
-during rotation. Replace the old primary/secondary file settings with this list
-when updating the chart and bridge image together.
+during rotation. Duplicate active verifier hashes also fail validation closed,
+even for unrelated keys. Replace the old primary/secondary file settings with
+this list when updating the chart and bridge image together.
 
 Provision the dedicated role and empty database on `postgres-operations` before
 starting the bridge, grant that role table/index creation rights in its own

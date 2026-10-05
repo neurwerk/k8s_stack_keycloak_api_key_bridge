@@ -54,6 +54,8 @@ class ManagedApiKeyValidator:
             for slot, grant_file, verifier_file in self._files
             if (verifier := self._load_slot(slot, grant_file, verifier_file)) is not None
         ]
+        if len({verifier.verifier for verifier in verifiers}) != len(verifiers):
+            raise ManagedApiKeyConfigurationError("duplicate active managed verifiers")
         candidate = hashlib.sha256(key_value.encode()).hexdigest()
         for verifier in verifiers:
             if hmac.compare_digest(candidate, verifier.verifier):
