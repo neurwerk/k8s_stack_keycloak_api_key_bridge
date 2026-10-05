@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from keycloak_api_key_bridge.config.settings import ManagedRegistration
 from keycloak_api_key_bridge.lib.permissions import is_valid_permission
 
 _VERIFIER_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -38,18 +39,12 @@ class _ManagedApiKeyVerifier:
 
 
 class ManagedApiKeyValidator:
-    """Load and validate primary and secondary managed API-key slots."""
+    """Reload every configured managed API-key registration on each request."""
 
-    def __init__(
-        self,
-        primary_grant_file: str = "",
-        primary_verifier_file: str = "",
-        secondary_grant_file: str = "",
-        secondary_verifier_file: str = "",
-    ) -> None:
-        self._files = (
-            ("primary", primary_grant_file, primary_verifier_file),
-            ("secondary", secondary_grant_file, secondary_verifier_file),
+    def __init__(self, registrations: list[ManagedRegistration]) -> None:
+        self._files = tuple(
+            (str(index), registration.grant_file, registration.verifier_file)
+            for index, registration in enumerate(registrations, start=1)
         )
 
     def match(self, key_value: str) -> ManagedApiKey | None:
@@ -59,6 +54,8 @@ class ManagedApiKeyValidator:
             for slot, grant_file, verifier_file in self._files
             if (verifier := self._load_slot(slot, grant_file, verifier_file)) is not None
         ]
+        if len({verifier.verifier for verifier in verifiers}) != len(verifiers):
+            raise ManagedApiKeyConfigurationError("duplicate active managed verifiers")
         candidate = hashlib.sha256(key_value.encode()).hexdigest()
         for verifier in verifiers:
             if hmac.compare_digest(candidate, verifier.verifier):
@@ -76,7 +73,7 @@ class ManagedApiKeyValidator:
             verifier_content = Path(verifier_file).read_text(encoding="utf-8")
         except OSError as exc:
             raise ManagedApiKeyConfigurationError(f"managed slot {slot} is unreadable") from exc
-        if not verifier_content.strip() and slot == "secondary":
+        if not verifier_content.strip():
             return None
         return _ManagedApiKeyVerifier(
             key=_parse_grant(slot, grant_content),

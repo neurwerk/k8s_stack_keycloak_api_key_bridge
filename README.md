@@ -61,6 +61,15 @@ are `5432`, `api_key_bridge`, and `api_key_bridge`. A password containing URL
 punctuation works as-is; no URL encoding is needed. Store passwords and managed
 key verifiers in a secret manager or Secret volume, never in Git.
 
+`MANAGED_REGISTRATIONS` is a JSON array of objects with `grant_file` and
+`verifier_file` paths (with the common prefix). It defaults to `[]`, so the
+bridge can run without managed keys. Each grant keeps the version-2 format.
+All listed files are reloaded on each validation request; unreadable or invalid
+registrations fail validation closed. An empty verifier disables its registration
+during rotation. Duplicate active verifier hashes also fail validation closed,
+even for unrelated keys. Replace the old primary/secondary file settings with
+this list when updating the chart and bridge image together.
+
 Provision the dedicated role and empty database on `postgres-operations` before
 starting the bridge, grant that role table/index creation rights in its own
 database, and deliver the matching password to the bridge. Run
