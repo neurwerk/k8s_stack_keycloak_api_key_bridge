@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
 
@@ -18,6 +18,15 @@ class AuthInfo:
     client_id: str
     client_secret: str
     issuer: str = ""
+
+
+class ManagedRegistration(BaseModel):
+    """Paths to one public grant and its secret verifier."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    grant_file: str = Field(min_length=1)
+    verifier_file: str = Field(min_length=1)
 
 
 class Settings(BaseSettings):
@@ -51,10 +60,7 @@ class Settings(BaseSettings):
     postgres_password: str = ""
     max_keys_per_user: int = Field(default=20, ge=1, le=100)
 
-    managed_primary_grant_file: str = ""
-    managed_primary_verifier_file: str = ""
-    managed_secondary_grant_file: str = ""
-    managed_secondary_verifier_file: str = ""
+    managed_registrations: list[ManagedRegistration] = Field(default_factory=list)
 
     host: str = "0.0.0.0"
     port: int = 8000

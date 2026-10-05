@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from keycloak_api_key_bridge.config.settings import AuthInfo
+from keycloak_api_key_bridge.config.settings import AuthInfo, ManagedRegistration
 from keycloak_api_key_bridge.lib.keycloak import KeycloakClient
 from keycloak_api_key_bridge.lib.managed_api_keys import (
     ManagedApiKeyConfigurationError,
@@ -17,14 +17,14 @@ from keycloak_api_key_bridge.lib.managed_api_keys import (
 )
 
 
-def write_grant(path: Path, key_id: str = "dify-primary") -> None:
+def write_grant(path: Path, key_id: str = "service-primary") -> None:
     path.write_text(
         json.dumps(
             {
                 "version": 2,
                 "id": key_id,
-                "name": "dify-agentgateway",
-                "principal": {"kind": "service_account", "client_id": "dify-agentgateway"},
+                "name": "service-agentgateway",
+                "principal": {"kind": "service_account", "client_id": "service-agentgateway"},
                 "permissions": ["llm:invoke"],
             }
         ),
@@ -49,7 +49,7 @@ def test_validator_hot_reloads_grant_and_verifier(tmp_path: Path) -> None:
     write_grant(grant)
     write_verifier(verifier, "first")
     validator = ManagedApiKeyValidator(
-        primary_grant_file=str(grant), primary_verifier_file=str(verifier)
+        [ManagedRegistration(grant_file=str(grant), verifier_file=str(verifier))]
     )
     assert validator.match("first") is not None
 
@@ -57,7 +57,7 @@ def test_validator_hot_reloads_grant_and_verifier(tmp_path: Path) -> None:
     assert validator.match("first") is None
     matched = validator.match("second")
     assert matched is not None
-    assert matched.principal_client_id == "dify-agentgateway"
+    assert matched.principal_client_id == "service-agentgateway"
     assert matched.permissions == ("llm:invoke",)
 
 
@@ -72,46 +72,58 @@ def test_validator_rejects_legacy_combined_descriptor(tmp_path: Path) -> None:
     write_verifier(verifier, "secret")
     with pytest.raises(ManagedApiKeyConfigurationError):
         ManagedApiKeyValidator(
-            primary_grant_file=str(grant), primary_verifier_file=str(verifier)
+            [ManagedRegistration(grant_file=str(grant), verifier_file=str(verifier))]
         ).match("secret")
 
 
-def test_validator_accepts_primary_and_secondary_during_rotation(tmp_path: Path) -> None:
+def test_validator_accepts_multiple_registrations_during_rotation(tmp_path: Path) -> None:
+    assert ManagedApiKeyValidator([]).match("old-key") is None
     primary_grant = tmp_path / "primary.json"
     primary_verifier = tmp_path / "primary.sha256"
     secondary_grant = tmp_path / "secondary.json"
     secondary_verifier = tmp_path / "secondary.sha256"
+    third_grant = tmp_path / "third.json"
+    third_verifier = tmp_path / "third.sha256"
     write_grant(primary_grant)
-    write_grant(secondary_grant, "dify-secondary")
+    write_grant(secondary_grant, "service-secondary")
+    write_grant(third_grant, "service-third")
     write_verifier(primary_verifier, "old-key")
     write_verifier(secondary_verifier, "new-key")
+    write_verifier(third_verifier, "third-key")
     validator = ManagedApiKeyValidator(
-        primary_grant_file=str(primary_grant),
-        primary_verifier_file=str(primary_verifier),
-        secondary_grant_file=str(secondary_grant),
-        secondary_verifier_file=str(secondary_verifier),
+        [
+            ManagedRegistration(grant_file=str(primary_grant), verifier_file=str(primary_verifier)),
+            ManagedRegistration(
+                grant_file=str(secondary_grant), verifier_file=str(secondary_verifier)
+            ),
+            ManagedRegistration(grant_file=str(third_grant), verifier_file=str(third_verifier)),
+        ]
     )
 
     assert validator.match("old-key") is not None
     assert validator.match("new-key") is not None
+    assert validator.match("third-key") is not None
 
     secondary_verifier.write_text("", encoding="utf-8")
     assert validator.match("old-key") is not None
     assert validator.match("new-key") is None
+    assert validator.match("third-key") is not None
 
 
-def test_validator_rejects_incomplete_or_invalid_primary_slot(tmp_path: Path) -> None:
+def test_validator_rejects_invalid_registration(tmp_path: Path) -> None:
     grant = tmp_path / "primary.json"
     verifier = tmp_path / "primary.sha256"
     write_grant(grant)
 
-    with pytest.raises(ManagedApiKeyConfigurationError, match="incomplete"):
-        ManagedApiKeyValidator(primary_grant_file=str(grant)).match("secret")
+    with pytest.raises(ManagedApiKeyConfigurationError, match="unreadable"):
+        ManagedApiKeyValidator(
+            [ManagedRegistration(grant_file=str(grant), verifier_file=str(verifier))]
+        ).match("secret")
 
-    verifier.write_text("", encoding="utf-8")
+    verifier.write_text("invalid", encoding="utf-8")
     with pytest.raises(ManagedApiKeyConfigurationError, match="invalid verifier"):
         ManagedApiKeyValidator(
-            primary_grant_file=str(grant), primary_verifier_file=str(verifier)
+            [ManagedRegistration(grant_file=str(grant), verifier_file=str(verifier))]
         ).match("secret")
 
 

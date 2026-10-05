@@ -70,12 +70,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
         )
     app.state.auth_info = build_auth_info(settings)
     app.state.max_keys_per_user = settings.max_keys_per_user
-    app.state.managed_api_keys = ManagedApiKeyValidator(
-        primary_grant_file=settings.managed_primary_grant_file,
-        primary_verifier_file=settings.managed_primary_verifier_file,
-        secondary_grant_file=settings.managed_secondary_grant_file,
-        secondary_verifier_file=settings.managed_secondary_verifier_file,
-    )
+    app.state.managed_api_keys = ManagedApiKeyValidator(settings.managed_registrations)
 
     # ── Singleton KeycloakClient ──────────────────────────────────────────
     # Created once at startup so the admin token (client_credentials) is cached
