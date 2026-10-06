@@ -345,6 +345,7 @@ def _validate_key(
         principal_id=key["user_id"],
         permissions=permissions,
         groups=sorted(entitlements.groups),
+        account_email=entitlements.account_email,
     )
 
 
@@ -389,6 +390,7 @@ def _managed_key_response(
         principal_id=principal_id,
         permissions=permissions,
         groups=sorted(entitlements.groups),
+        account_email=entitlements.account_email,
     )
 
 
@@ -403,12 +405,14 @@ def _decision_response(
     principal_id: str,
     permissions: list[str],
     groups: list[str],
+    account_email: str | None,
 ) -> JSONResponse:
     """Return the stable decision body and bounded trusted gateway projection."""
     auth_context = json.dumps(
         {
             "contract_version": 1,
             "principal_id": principal_id,
+            "account_email": account_email,
             "permissions": permissions,
             "groups": groups,
             "credential_id": context_credential_id or credential_id,
@@ -430,6 +434,7 @@ def _decision_response(
                 "expires_at": expires_at,
             },
             "principal": {"kind": principal_kind, "id": principal_id},
+            "account_email": account_email,
             "permissions": permissions,
             "groups": groups,
         },

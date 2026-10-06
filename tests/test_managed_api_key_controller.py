@@ -33,7 +33,9 @@ class FakeKeycloakClient:
     def get_principal_entitlements(self, principal_id: str) -> PrincipalEntitlements | None:
         if principal_id != "service-account":
             return None
-        return PrincipalEntitlements(frozenset({"llm:invoke"}), frozenset())
+        return PrincipalEntitlements(
+            frozenset({"llm:invoke"}), frozenset(), account_email="service@example.com"
+        )
 
 
 class AvailableJWKSCache:
@@ -82,7 +84,10 @@ def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> Non
     app.state.keycloak_configured = True
     app.state.jwks_cache = AvailableJWKSCache()
     with TestClient(app, raise_server_exceptions=False) as client:
-        response = client.get("/validate", headers={"x-api-key": "managed-secret"})
+        response = client.get(
+            "/validate",
+            headers={"x-api-key": "managed-secret", "x-account-email": "creator@example.com"},
+        )
         repeated = client.post("/validate", headers={"Authorization": "Bearer managed-secret"})
 
     assert response.status_code == 200
@@ -95,6 +100,7 @@ def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> Non
             "expires_at": None,
         },
         "principal": {"kind": "service_account", "id": "service-account"},
+        "account_email": "service@example.com",
         "permissions": ["llm:invoke"],
         "groups": [],
     }
@@ -107,6 +113,7 @@ def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> Non
     assert json.loads(response.headers["x-agentgateway-auth-context"]) == {
         "contract_version": response.json()["contract_version"],
         "principal_id": response.json()["principal"]["id"],
+        "account_email": "service@example.com",
         "permissions": response.json()["permissions"],
         "groups": [],
         "credential_id": expected_id,
