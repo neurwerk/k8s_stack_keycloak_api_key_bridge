@@ -288,6 +288,7 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
             "expires_at": ANY,
         },
         "principal": {"kind": "user", "id": "user-a"},
+        "account_email": None,
         "permissions": ["llm:invoke", "mcp:brave:invoke"],
         "groups": ["/team"],
     }
@@ -316,6 +317,7 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
             {
                 "contract_version": body["contract_version"],
                 "principal_id": body["principal"]["id"],
+                "account_email": body["account_email"],
                 "permissions": body["permissions"],
                 "groups": body["groups"],
                 "credential_id": body["credential"]["id"],
@@ -332,6 +334,7 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
             {
                 "contract_version": 1,
                 "principal_id": principal_prefix,
+                "account_email": None,
                 "permissions": ["llm:invoke"],
                 "groups": [],
                 "credential_id": str(uuid.UUID(int=0)),
@@ -370,6 +373,7 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
             assert json.loads(header) == {
                 "contract_version": 1,
                 "principal_id": principal_id,
+                "account_email": None,
                 "permissions": response.json()["permissions"],
                 "groups": [],
                 "credential_id": response.json()["credential"]["id"],
@@ -378,7 +382,10 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
             assert response.json()["principal"]["id"] == principal_id
 
 
-def test_validate_returns_current_keycloak_groups(client: TestClient) -> None:
+@pytest.mark.parametrize("email", ["owner@example.com", None, "", " ", 42])
+def test_validate_returns_current_groups_and_trusted_owner_email(
+    client: TestClient, email: str | int | None
+) -> None:
     groups = [{"path": f"/teams/team-{index}"} for index in range(101)]
     pages: list[int] = []
 
@@ -386,7 +393,7 @@ def test_validate_returns_current_keycloak_groups(client: TestClient) -> None:
         if request.url.path.endswith("/token"):
             return httpx.Response(200, json={"access_token": _management_token()})
         if request.url.path.endswith("/users/user-a"):
-            return httpx.Response(200, json={"enabled": True})
+            return httpx.Response(200, json={"enabled": True, "email": email})
         if request.url.path.endswith("/clients"):
             return httpx.Response(200, json=[{"id": "agentgateway-id"}])
         if request.url.path.endswith("/composite"):
@@ -399,14 +406,34 @@ def test_validate_returns_current_keycloak_groups(client: TestClient) -> None:
 
     with client.app.state.db_factory() as session:
         _, key = ApiKey.create_key(
-            session, name="groups", user_id="user-a", permissions=["llm:invoke"], validity_days=1
+            session,
+            name="groups",
+            user_id="user-a",
+            permissions=["llm:invoke"],
+            validity_days=1,
+            created_by_user_id="user-b",
         )
     client.app.state.kc_client = KeycloakClient(
         AuthInfo(_KEYCLOAK_URL, "test", "bridge", "test-secret"),
         client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
-    response = client.get("/validate", headers={"x-api-key": key})
-    assert response.status_code == 200, response.text
+    for method in ("GET", "POST"):
+        response = client.request(
+            method,
+            "/validate?account_email=caller@example.com&user_id=user-b",
+            headers={
+                "x-api-key": key,
+                "x-account-email": "caller@example.com",
+                "x-agentgateway-auth-context": '{"account_email":"caller@example.com"}',
+            },
+            json={"account_email": "caller@example.com"},
+        )
+        assert response.status_code == 200, response.text
+        expected_email = email if isinstance(email, str) and email.strip() else None
+        assert response.json()["account_email"] == expected_email
+        context = json.loads(response.headers["x-agentgateway-auth-context"])
+        assert context["account_email"] == expected_email
+        assert context["principal_id"] == "user-a"
     assert pages == [0, 100]
     assert response.json()["groups"] == sorted(group["path"] for group in groups)
     context = json.loads(response.headers["x-agentgateway-auth-context"])

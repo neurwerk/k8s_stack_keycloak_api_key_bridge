@@ -23,10 +23,11 @@ class KeycloakUnavailableError(RuntimeError):
 
 @dataclass(frozen=True)
 class PrincipalEntitlements:
-    """Current AgentGateway permissions and group paths of an enabled principal."""
+    """Current permissions, group paths and account email of an enabled principal."""
 
     permissions: frozenset[str]
     groups: frozenset[str]
+    account_email: str | None = None
 
 
 class KeycloakClient:
@@ -191,7 +192,12 @@ class KeycloakClient:
             if len(memberships) < 100:
                 break
             first += len(memberships)
-        return PrincipalEntitlements(permissions=permissions, groups=frozenset(groups))
+        email = user.get("email")
+        return PrincipalEntitlements(
+            permissions=permissions,
+            groups=frozenset(groups),
+            account_email=email if isinstance(email, str) and email.strip() else None,
+        )
 
     def _get_user(self, user_id: str) -> dict | None:
         try:

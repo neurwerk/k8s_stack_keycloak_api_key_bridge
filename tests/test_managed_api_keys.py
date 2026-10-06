@@ -133,15 +133,18 @@ def test_validator_rejects_invalid_registration(tmp_path: Path) -> None:
         ).match("secret")
 
 
-def test_keycloak_client_caches_current_entitlements() -> None:
+def test_keycloak_client_caches_current_entitlements(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
+    now = 100.0
+    user = {"enabled": True, "email": "owner@example.com"}
+    monkeypatch.setattr("keycloak_api_key_bridge.lib.keycloak.time.monotonic", lambda: now)
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
         if request.url.path.endswith("/token"):
             return httpx.Response(200, json={"access_token": service_token()})
         if request.url.path.endswith("/users/user-1"):
-            return httpx.Response(200, json={"enabled": True})
+            return httpx.Response(200, json=user)
         if request.url.path.endswith("/clients"):
             return httpx.Response(200, json=[{"id": "agentgateway-id"}])
         if request.url.path.endswith("/composite"):
@@ -155,13 +158,20 @@ def test_keycloak_client_caches_current_entitlements() -> None:
         AuthInfo("https://keycloak.test", "test", "bridge", "secret"), client=http_client
     )
     first = client.get_principal_entitlements("user-1")
+    user["email"] = "updated@example.com"
     second = client.get_principal_entitlements("user-1")
     assert first is not None
     assert second is not None
     assert first.permissions == frozenset({"llm:invoke"})
     assert second.permissions == frozenset({"llm:invoke"})
     assert first.groups == second.groups == frozenset({"/team"})
+    assert first.account_email == second.account_email == "owner@example.com"
     assert sum(url.endswith("/users/user-1") for url in calls) == 1
+    now += 31
+    refreshed = client.get_principal_entitlements("user-1")
+    assert refreshed is not None
+    assert refreshed.account_email == "updated@example.com"
+    assert sum(url.endswith("/users/user-1") for url in calls) == 2
     client.close()
 
 
