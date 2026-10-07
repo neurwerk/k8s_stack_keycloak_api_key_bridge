@@ -7,8 +7,8 @@ development code and may contain fixes that have not yet been released.
 
 ## Reporting a Vulnerability
 
-Do not report suspected vulnerabilities in a public issue, discussion, or pull
-request. Use the repository's private GitHub security advisory form:
+Do not report suspected vulnerabilities in a public issue or pull request.
+Use the repository's private GitHub security advisory form:
 
 https://github.com/neurwerk/k8s_stack_keycloak_api_key_bridge/security/advisories/new
 
