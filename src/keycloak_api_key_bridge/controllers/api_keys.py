@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
+import re
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -37,6 +40,8 @@ router = APIRouter()
 
 ADMIN_ROLE_NAME = "api-key-admin"
 _KEY_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+_MAX_AUTHORIZATION_HEADER_LENGTH = 8192
+_AUTHORIZATION_PATTERN = re.compile(r"([A-Za-z]+) +([A-Za-z0-9._~+/-]+=*)")
 
 
 class CreateApiKeyRequest(BaseModel):
@@ -290,8 +295,49 @@ def validate_key(
     managed_api_keys: ManagedApiKeyValidator = Depends(get_managed_api_keys),
 ) -> JSONResponse:
     """Validate a credential and return a versioned trusted authorization decision."""
+    return _validation_response(request, db, kc, managed_api_keys, x_api_key=x_api_key)
+
+
+@router.get("/validate/neurwerk")
+@router.post("/validate/neurwerk")
+def validate_neurwerk_key(
+    request: Request,
+    db: Session = Depends(get_db),
+    kc: KeycloakClient | None = Depends(get_kc_client),
+    managed_api_keys: ManagedApiKeyValidator = Depends(get_managed_api_keys),
+) -> JSONResponse:
+    """Validate only the dedicated Neurwerk bearer key, without credential fallback."""
+    return _validation_response(request, db, kc, managed_api_keys, mode="neurwerk")
+
+
+@router.get("/validate/proxy")
+@router.post("/validate/proxy")
+def validate_proxy_key(
+    request: Request,
+    db: Session = Depends(get_db),
+    kc: KeycloakClient | None = Depends(get_kc_client),
+    managed_api_keys: ManagedApiKeyValidator = Depends(get_managed_api_keys),
+) -> JSONResponse:
+    """Validate only the proxy Basic password; its username never selects identity."""
+    return _validation_response(request, db, kc, managed_api_keys, mode="proxy")
+
+
+def _validation_response(
+    request: Request,
+    db: Session,
+    kc: KeycloakClient | None,
+    managed_api_keys: ManagedApiKeyValidator,
+    *,
+    mode: Literal["legacy", "neurwerk", "proxy"] = "legacy",
+    x_api_key: str | None = None,
+) -> JSONResponse:
+    """Share key validation and error serialization across explicit credential modes."""
     try:
-        return _validate_key(request, x_api_key, db, kc, managed_api_keys)
+        if mode == "legacy":
+            key_value = x_api_key or _bearer_api_key(request)
+        else:
+            key_value = _dedicated_api_key(request, mode)
+        return _validate_key(request, key_value, db, kc, managed_api_keys)
     except HTTPException as exc:
         return JSONResponse(
             status_code=exc.status_code,
@@ -302,7 +348,7 @@ def validate_key(
 
 def _validate_key(
     request: Request,
-    x_api_key: str | None,
+    key_value: str | None,
     db: Session,
     kc: KeycloakClient | None,
     managed_api_keys: ManagedApiKeyValidator,
@@ -310,7 +356,6 @@ def _validate_key(
     cache = request.app.state.jwks_cache
     if not request.app.state.keycloak_configured or cache is None or not cache.is_available():
         raise HTTPException(status_code=503, detail="Keycloak authorization unavailable")
-    key_value = x_api_key or _bearer_api_key(request)
     if not key_value:
         raise HTTPException(status_code=401, detail="An API key must be passed as a header")
     try:
@@ -352,6 +397,42 @@ def _validate_key(
 def _bearer_api_key(request: Request) -> str | None:
     authorization = request.headers.get("authorization", "")
     return authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else None
+
+
+def _dedicated_api_key(request: Request, mode: Literal["neurwerk", "proxy"]) -> str:
+    """Read exactly one bounded identity header, rejecting ambiguous encodings."""
+    header_name, expected_scheme = (
+        ("x-neurwerk-authorization", "bearer")
+        if mode == "neurwerk"
+        else ("proxy-authorization", "basic")
+    )
+    values = request.headers.getlist(header_name)
+    invalid = HTTPException(status_code=401, detail="Invalid authentication credentials")
+    if len(values) != 1 or len(values[0]) > _MAX_AUTHORIZATION_HEADER_LENGTH:
+        raise invalid
+    match = _AUTHORIZATION_PATTERN.fullmatch(values[0])
+    if match is None or match[1].lower() != expected_scheme:
+        raise invalid
+    token = match[2]
+    if mode == "neurwerk":
+        return token
+
+    # Bound the encoded input before decoding, and reject noncanonical padding,
+    # invalid UTF-8, control characters and incomplete username:password pairs.
+    try:
+        decoded = base64.b64decode(token, validate=True)
+        user_pass = decoded.decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        raise invalid from None
+    username, _, key_value = user_pass.partition(":")
+    if (
+        base64.b64encode(decoded).decode("ascii") != token
+        or not username
+        or not key_value
+        or any(ord(char) < 32 or ord(char) == 127 for char in user_pass)
+    ):
+        raise invalid
+    return key_value
 
 
 def _managed_key_response(

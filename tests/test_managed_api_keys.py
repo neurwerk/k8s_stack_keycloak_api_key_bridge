@@ -148,7 +148,16 @@ def test_keycloak_client_caches_current_entitlements(monkeypatch: pytest.MonkeyP
         if request.url.path.endswith("/clients"):
             return httpx.Response(200, json=[{"id": "agentgateway-id"}])
         if request.url.path.endswith("/composite"):
-            return httpx.Response(200, json=[{"name": "llm:invoke"}, {"name": "ignored"}])
+            return httpx.Response(
+                200,
+                json=[
+                    {"name": "llm:invoke"},
+                    {"name": "application:assistant:invoke"},
+                    {"name": "provider:example:company-use"},
+                    {"name": "provider:*:company-use"},
+                    {"name": "ignored"},
+                ],
+            )
         if request.url.path.endswith("/groups"):
             return httpx.Response(200, json=[{"path": "/team"}])
         raise AssertionError(request.url)
@@ -162,8 +171,11 @@ def test_keycloak_client_caches_current_entitlements(monkeypatch: pytest.MonkeyP
     second = client.get_principal_entitlements("user-1")
     assert first is not None
     assert second is not None
-    assert first.permissions == frozenset({"llm:invoke"})
-    assert second.permissions == frozenset({"llm:invoke"})
+    assert (
+        first.permissions
+        == second.permissions
+        == frozenset({"llm:invoke", "application:assistant:invoke", "provider:example:company-use"})
+    )
     assert first.groups == second.groups == frozenset({"/team"})
     assert first.account_email == second.account_email == "owner@example.com"
     assert sum(url.endswith("/users/user-1") for url in calls) == 1

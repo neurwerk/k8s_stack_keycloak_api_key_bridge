@@ -109,6 +109,14 @@ def _authorization_header(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _dedicated_header(mode: str, key: str, username: str = "user-b") -> tuple[str, str]:
+    """Build a selected identity header with a deliberately mixed-case scheme."""
+    if mode == "neurwerk":
+        return "X-Neurwerk-Authorization", f"bEaReR  {key}"
+    token = base64.b64encode(f"{username}:{key}".encode()).decode()
+    return "Proxy-Authorization", f"bAsIc  {token}"
+
+
 class FakeKeycloakClient:
     """Configurable current-entitlement provider for controller tests."""
 
@@ -277,7 +285,15 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
     assert "x-agentgateway-auth-context" not in created.headers
     key = created.json()["api_key"]
 
-    validated = client.get("/validate", headers={"x-api-key": key})
+    validated = client.get(
+        "/validate",
+        headers={
+            "x-api-key": key,
+            "Authorization": "Bearer unrelated-key",
+            "X-Neurwerk-Authorization": "malformed",
+            "Proxy-Authorization": "malformed",
+        },
+    )
     assert validated.status_code == 200, validated.text
     assert validated.json() == {
         "contract_version": 1,
@@ -305,7 +321,7 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
     client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
         frozenset(), frozenset()
     )
-    empty = client.post("/validate", headers={"Authorization": f"Bearer {key}"})
+    empty = client.post("/validate", headers={"x-api-key": "", "Authorization": f"Bearer {key}"})
     assert empty.status_code == 200
     assert empty.json()["permissions"] == []
     for response in (validated, restricted, empty):
@@ -442,10 +458,173 @@ def test_validate_returns_current_groups_and_trusted_owner_email(
     assert context["permissions"] == ["llm:invoke"]
 
 
-def test_create_rejects_permissions_not_in_live_entitlements(client: TestClient) -> None:
+@pytest.mark.parametrize("mode", ["neurwerk", "proxy"])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_explicit_validation_preserves_owner_grants_and_revocation(
+    client: TestClient, caplog: pytest.LogCaptureFixture, mode: str, method: str
+) -> None:
+    grant = [
+        "llm:invoke",
+        "mcp:brave:invoke",
+        "application:assistant/v1.0:invoke",
+        "provider:example:company-use",
+    ]
+    rights = frozenset([*grant, "model:other:invoke"])
+    client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
+        rights, frozenset({"/team"}), "owner@example.com"
+    )
+    created = client.post(
+        "/api_keys", json={"name": "explicit", "permissions": grant, "expires_in_days": 30}
+    )
+    assert created.status_code == 200
+    key = created.json()["api_key"]
+    with client.app.state.db_factory() as session:
+        _, other_key = ApiKey.create_key(
+            session, name="other", user_id="user-b", permissions=["llm:invoke"], validity_days=30
+        )
+    other_mode = "proxy" if mode == "neurwerk" else "neurwerk"
+    headers = {
+        **dict([_dedicated_header(mode, key), _dedicated_header(other_mode, other_key)]),
+        "Authorization": "Bearer provider-private-token",
+        "x-api-key": other_key,
+        "x-auth-user": "user-b",
+        "x-agentgateway-auth-context": '{"principal_id":"user-b"}',
+    }
+    legacy = client.get("/validate", headers={"x-api-key": key})
+    response = client.request(method, f"/validate/{mode}", headers=headers)
+    assert response.status_code == 200
+    assert response.json() == legacy.json()
+    assert (
+        response.headers["x-agentgateway-auth-context"]
+        == legacy.headers["x-agentgateway-auth-context"]
+    )
+    assert response.json()["principal"] == {"kind": "user", "id": "user-a"}
+    assert response.json()["permissions"] == sorted(grant)
+    for secret in (key, other_key, "provider-private-token"):
+        assert secret not in response.text + str(response.headers) + caplog.text
+
+    # New user rights cannot expand the stored grant; removed rights take effect.
+    client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
+        rights | {"provider:added-later:company-use"}, frozenset()
+    )
+    assert client.request(method, f"/validate/{mode}", headers=headers).json()[
+        "permissions"
+    ] == sorted(grant)
+    client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
+        rights - {"provider:example:company-use"}, frozenset()
+    )
+    assert client.request(method, f"/validate/{mode}", headers=headers).json()[
+        "permissions"
+    ] == sorted(grant[:-1])
+    assert client.post(f"/api_keys/{created.json()['id']}/revoke").status_code == 200
+    assert client.request(method, f"/validate/{mode}", headers=headers).status_code == 401
+
+
+@pytest.mark.parametrize("mode", ["neurwerk", "proxy"])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_explicit_validation_rejects_ambiguous_input_without_fallback(
+    client: TestClient, caplog: pytest.LogCaptureFixture, mode: str, method: str
+) -> None:
+    created = client.post(
+        "/api_keys", json={"name": "fallback", "permissions": ["llm:invoke"], "expires_in_days": 1}
+    )
+    key = created.json()["api_key"]
+    header, valid = _dedicated_header(mode, key)
+    other_mode = "proxy" if mode == "neurwerk" else "neurwerk"
+    fallback_headers = [
+        ("Authorization", f"Bearer {key}"),
+        ("x-api-key", key),
+        _dedicated_header(other_mode, key),
+    ]
+    malformed = [
+        [],
+        [(header, "")],
+        [(header, valid.split()[0])],
+        [(header, valid.replace("  ", "\t"))],
+        [(header, f"{valid}, {valid}")],
+        [(header, f"{valid},")],
+        [(header, "Bearer " + "x" * 8192)],
+        [(header, _dedicated_header(other_mode, key)[1])],
+        [(header, valid), (header.lower(), valid)],
+        [(header, valid), (header.lower(), "")],
+        [(header, ""), (header.lower(), valid)],
+    ]
+    if mode == "proxy":
+        malformed.extend(
+            [(header, f"Basic {token}")]
+            for token in (
+                "not_base64",
+                "dTpr===",  # Superfluous padding after a complete base64 quantum.
+                "dTprZf==",  # Nonzero padding bits (noncanonical encoding of u:ke).
+                "dTprZQ",  # Missing required padding.
+                base64.b64encode(b"username-without-colon").decode(),
+                base64.b64encode(f":{key}".encode()).decode(),
+                base64.b64encode(b"username:").decode(),
+                base64.b64encode(f"username\x00:{key}".encode()).decode(),
+                base64.b64encode(f"username:{key}\r\n".encode()).decode(),
+                base64.b64encode(b"\xff:" + key.encode()).decode(),
+            )
+        )
+    for selected_headers in malformed:
+        response = client.request(
+            method, f"/validate/{mode}", headers=fallback_headers + selected_headers
+        )
+        assert response.status_code == 401
+        assert response.json() == {
+            "detail": "Invalid authentication credentials",
+            "error": {"message": "Invalid authentication credentials"},
+        }
+        assert "x-agentgateway-auth-context" not in response.headers
+    # A syntactically valid unknown key or signed OIDC token is not an identity.
+    for unknown in ("unrecognized-access-key", _management_token()):
+        response = client.request(
+            method,
+            f"/validate/{mode}",
+            headers=fallback_headers + [_dedicated_header(mode, unknown)],
+        )
+        assert response.status_code == 401
+        assert response.json() == {
+            "detail": "Invalid or expired key",
+            "error": {"message": "Invalid or expired key"},
+        }
+        assert unknown not in response.text + caplog.text
+    assert key not in caplog.text
+
+
+def test_proxy_validation_bounds_encoded_input_before_decoding(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created = client.post(
+        "/api_keys", json={"name": "bounded", "permissions": ["llm:invoke"], "expires_in_days": 1}
+    )
+    key = created.json()["api_key"]
+    header, value = _dedicated_header("proxy", key, username="u" * (6138 - len(key) - 1))
+    # The longest canonical base64 token within the limit remains usable.
+    assert len(value) == 8191
+    assert client.get("/validate/proxy", headers={header: value}).status_code == 200
+
+    def unexpected_decode(*args: object, **kwargs: object) -> bytes:
+        raise AssertionError("Oversized authentication input reached base64 decoding")
+
+    monkeypatch.setattr(
+        "keycloak_api_key_bridge.controllers.api_keys.base64.b64decode", unexpected_decode
+    )
+    oversized = value + "AAAA"
+    response = client.get("/validate/proxy", headers={header: oversized})
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid authentication credentials"
+
+
+@pytest.mark.parametrize(
+    "permission",
+    ["model:restricted:invoke", "application:restricted:invoke", "provider:restricted:company-use"],
+)
+def test_create_rejects_permissions_not_in_live_entitlements(
+    client: TestClient, permission: str
+) -> None:
     response = client.post(
         "/api_keys",
-        json={"name": "cli", "permissions": ["model:restricted:invoke"], "expires_in_days": 30},
+        json={"name": "cli", "permissions": [permission], "expires_in_days": 30},
     )
     assert response.status_code == 403
 
@@ -543,6 +722,14 @@ def test_create_requires_bounded_expiry(client: TestClient) -> None:
         pytest.param([], id="empty"),
         pytest.param(["invalid:permission"], id="invalid-namespace"),
         pytest.param(["llm:invoke", "llm:invoke"], id="duplicate"),
+        pytest.param(["application:*:invoke"], id="application-wildcard"),
+        pytest.param(["provider:*:company-use"], id="provider-wildcard"),
+        pytest.param(["application:example:company-use"], id="wrong-application-operation"),
+        pytest.param(["provider:example:invoke"], id="wrong-provider-operation"),
+        pytest.param(["application::invoke"], id="empty-application"),
+        pytest.param(["provider:/example:company-use"], id="invalid-provider-start"),
+        pytest.param([f"application:{'a' * 129}:invoke"], id="oversized-application"),
+        pytest.param([f"provider:{'a' * 129}:company-use"], id="oversized-provider"),
     ],
 )
 def test_create_requires_an_explicit_valid_non_empty_grant(
@@ -607,14 +794,20 @@ def test_list_api_keys_is_bounded_by_the_configured_quota(client: TestClient) ->
 def test_permissions_returns_only_sorted_current_agentgateway_permissions(
     client: TestClient,
 ) -> None:
+    permissions = [
+        "llm:invoke",
+        "mcp:brave:invoke",
+        f"application:{'a' * 128}:invoke",
+        f"provider:{'b' * 128}:company-use",
+    ]
     client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
-        frozenset({"mcp:brave:invoke", "not-a-permission", "llm:invoke"}), frozenset()
+        frozenset([*permissions, "not-a-permission"]), frozenset()
     )
 
     response = client.get("/permissions")
 
     assert response.status_code == 200
-    assert response.json() == {"permissions": ["llm:invoke", "mcp:brave:invoke"]}
+    assert response.json() == {"permissions": sorted(permissions)}
 
 
 def test_permissions_allows_only_api_key_admin_to_target_another_user(

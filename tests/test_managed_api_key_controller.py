@@ -1,5 +1,6 @@
 """Controller tests for managed machine-principal authorization decisions."""
 
+import base64
 import hashlib
 import json
 import uuid
@@ -13,6 +14,8 @@ from fastapi.testclient import TestClient
 from keycloak_api_key_bridge.config.settings import AuthInfo, ManagedRegistration, Settings
 from keycloak_api_key_bridge.lib.keycloak import PrincipalEntitlements
 from keycloak_api_key_bridge.main import create_app
+
+_GRANT = ["application:assistant:invoke", "llm:invoke", "provider:example:company-use"]
 
 
 @pytest.fixture(autouse=True)
@@ -34,7 +37,7 @@ class FakeKeycloakClient:
         if principal_id != "service-account":
             return None
         return PrincipalEntitlements(
-            frozenset({"llm:invoke"}), frozenset(), account_email="service@example.com"
+            frozenset(_GRANT), frozenset(), account_email="service@example.com"
         )
 
 
@@ -59,7 +62,7 @@ def write_grant(path: Path) -> None:
                 "id": "service-primary",
                 "name": "service-agentgateway",
                 "principal": {"kind": "service_account", "client_id": "service-agentgateway"},
-                "permissions": ["llm:invoke"],
+                "permissions": _GRANT,
             }
         ),
         encoding="utf-8",
@@ -89,6 +92,22 @@ def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> Non
             headers={"x-api-key": "managed-secret", "x-account-email": "creator@example.com"},
         )
         repeated = client.post("/validate", headers={"Authorization": "Bearer managed-secret"})
+        for method in ("GET", "POST"):
+            for mode, header, value in (
+                ("neurwerk", "X-Neurwerk-Authorization", "Bearer managed-secret"),
+                (
+                    "proxy",
+                    "Proxy-Authorization",
+                    "Basic " + base64.b64encode(b"ignored:managed-secret").decode(),
+                ),
+            ):
+                explicit = client.request(method, f"/validate/{mode}", headers={header: value})
+                assert explicit.status_code == 200
+                assert explicit.json() == response.json()
+                assert (
+                    explicit.headers["x-agentgateway-auth-context"]
+                    == response.headers["x-agentgateway-auth-context"]
+                )
 
     assert response.status_code == 200
     assert response.json() == {
@@ -101,7 +120,7 @@ def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> Non
         },
         "principal": {"kind": "service_account", "id": "service-account"},
         "account_email": "service@example.com",
-        "permissions": ["llm:invoke"],
+        "permissions": _GRANT,
         "groups": [],
     }
     expected_id = str(
