@@ -14,7 +14,8 @@ verification. Minimal surface: no dashboard or deploy directory.
 | `POST /api_keys` | Bearer JWT | Create API key (self or `target_user_id` JSON field for `api-key-admin`) |
 | `POST /api_keys/{key_id}/revoke` | Bearer JWT | Revoke a key (admin may revoke any) |
 | `GET /api_keys` | Bearer JWT | List active keys (self or via `?user_id=`) |
-| `GET`/`POST /validate` | API key | Return a versioned authorization decision for AgentGateway |
+| `GET`/`POST /validate/neurwerk` | Dedicated Neurwerk bearer header | Return a versioned authorization decision for API access |
+| `GET`/`POST /validate/proxy` | Proxy Basic password | Return a versioned authorization decision for inspected proxy access |
 
 Settings are via `KEYCLOAK_API_KEY_BRIDGE_*` env vars.
 

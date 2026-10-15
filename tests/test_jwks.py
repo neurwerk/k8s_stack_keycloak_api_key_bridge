@@ -276,7 +276,9 @@ def test_health_requires_keycloak_but_liveness_does_not() -> None:
     with TestClient(app, raise_server_exceptions=False) as client:
         assert client.get("/live").status_code == 200
         readiness = client.get("/health")
-        validation = client.get("/validate", headers={"x-api-key": "test-key"})
+        validation = client.get(
+            "/validate/neurwerk", headers={"X-Neurwerk-Authorization": "Bearer test-key"}
+        )
 
     assert readiness.status_code == 503
     assert readiness.json()["checks"]["keycloak"] == "misconfigured"
@@ -294,9 +296,19 @@ def test_authorization_health_failure_invalidates_jwks_until_recovery() -> None:
         assert client.get("/health").status_code == 503
         assert not cache.is_available()
         assert keycloak.unavailable_calls == 1
-        assert client.get("/validate", headers={"x-api-key": "test-key"}).status_code == 503
+        assert (
+            client.get(
+                "/validate/neurwerk", headers={"X-Neurwerk-Authorization": "Bearer test-key"}
+            ).status_code
+            == 503
+        )
 
         keycloak.available = True
         cache.restore([key])
         assert client.get("/health").status_code == 200
-        assert client.get("/validate", headers={"x-api-key": "test-key"}).status_code == 401
+        assert (
+            client.get(
+                "/validate/neurwerk", headers={"X-Neurwerk-Authorization": "Bearer test-key"}
+            ).status_code
+            == 401
+        )

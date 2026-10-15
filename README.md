@@ -4,11 +4,10 @@ Keycloak API Key Bridge issues and validates API keys using Keycloak permissions
 
 ## API-key validation
 
-The internal validation API supports `GET` and `POST` on three endpoints:
+The internal validation API supports `GET` and `POST` on two endpoints:
 
 | Endpoint | Identity input |
 | --- | --- |
-| `/validate` | Existing behavior: a nonempty `x-api-key` takes precedence over `Authorization: Bearer <key>`. |
 | `/validate/neurwerk` | Exactly one `X-Neurwerk-Authorization: Bearer <Neurwerk access key>`. |
 | `/validate/proxy` | Exactly one `Proxy-Authorization: Basic <base64(username:Neurwerk access key)>`. |
 

@@ -286,11 +286,11 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
     key = created.json()["api_key"]
 
     validated = client.get(
-        "/validate",
+        "/validate/neurwerk",
         headers={
-            "x-api-key": key,
+            "x-api-key": "unrelated-key",
             "Authorization": "Bearer unrelated-key",
-            "X-Neurwerk-Authorization": "malformed",
+            "X-Neurwerk-Authorization": f"Bearer {key}",
             "Proxy-Authorization": "malformed",
         },
     )
@@ -314,14 +314,16 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
     client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
         frozenset({"llm:invoke"}), frozenset()
     )
-    restricted = client.get("/validate", headers={"x-api-key": key})
+    restricted = client.get(
+        "/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {key}"}
+    )
     assert restricted.status_code == 200
     assert restricted.json()["permissions"] == ["llm:invoke"]
 
     client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
         frozenset(), frozenset()
     )
-    empty = client.post("/validate", headers={"x-api-key": "", "Authorization": f"Bearer {key}"})
+    empty = client.post("/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {key}"})
     assert empty.status_code == 200
     assert empty.json()["permissions"] == []
     for response in (validated, restricted, empty):
@@ -373,7 +375,9 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
                 permissions=["llm:invoke"],
                 validity_days=1,
             )
-        response = client.get("/validate", headers={"x-api-key": boundary_key})
+        response = client.get(
+            "/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {boundary_key}"}
+        )
         if size > 65536:
             assert response.status_code == 503
             assert response.json() == {
@@ -436,9 +440,9 @@ def test_validate_returns_current_groups_and_trusted_owner_email(
     for method in ("GET", "POST"):
         response = client.request(
             method,
-            "/validate?account_email=caller@example.com&user_id=user-b",
+            "/validate/neurwerk?account_email=caller@example.com&user_id=user-b",
             headers={
-                "x-api-key": key,
+                "X-Neurwerk-Authorization": f"Bearer {key}",
                 "x-account-email": "caller@example.com",
                 "x-agentgateway-auth-context": '{"account_email":"caller@example.com"}',
             },
@@ -490,13 +494,16 @@ def test_explicit_validation_preserves_owner_grants_and_revocation(
         "x-auth-user": "user-b",
         "x-agentgateway-auth-context": '{"principal_id":"user-b"}',
     }
-    legacy = client.get("/validate", headers={"x-api-key": key})
+    baseline = client.get(
+        "/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {key}"}
+    )
+    assert client.get("/validate", headers={"x-api-key": key}).status_code == 404
     response = client.request(method, f"/validate/{mode}", headers=headers)
     assert response.status_code == 200
-    assert response.json() == legacy.json()
+    assert response.json() == baseline.json()
     assert (
         response.headers["x-agentgateway-auth-context"]
-        == legacy.headers["x-agentgateway-auth-context"]
+        == baseline.headers["x-agentgateway-auth-context"]
     )
     assert response.json()["principal"] == {"kind": "user", "id": "user-a"}
     assert response.json()["permissions"] == sorted(grant)
@@ -637,15 +644,17 @@ def test_validate_uses_401_for_disabled_principal_and_503_for_keycloak_outage(
     )
     key = created.json()["api_key"]
     for method, headers, detail in (
-        ("GET", {}, "An API key must be passed as a header"),
-        ("POST", {"x-api-key": "unknown-key"}, "Invalid or expired key"),
+        ("GET", {}, "Invalid authentication credentials"),
+        ("POST", {"X-Neurwerk-Authorization": "Bearer unknown-key"}, "Invalid or expired key"),
     ):
-        response = client.request(method, "/validate", headers=headers)
+        response = client.request(method, "/validate/neurwerk", headers=headers)
         assert response.status_code == 401
         assert response.json() == {"detail": detail, "error": {"message": detail}}
         assert "x-agentgateway-auth-context" not in response.headers
     client.app.state.kc_client.entitlements["user-a"] = None
-    response = client.get("/validate", headers={"x-api-key": key})
+    response = client.get(
+        "/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {key}"}
+    )
     assert response.status_code == 401
     assert response.json() == {
         "detail": "Keycloak principal is unavailable",
@@ -654,7 +663,9 @@ def test_validate_uses_401_for_disabled_principal_and_503_for_keycloak_outage(
     assert "x-agentgateway-auth-context" not in response.headers
 
     client.app.state.kc_client.failure = True
-    response = client.get("/validate", headers={"x-api-key": key})
+    response = client.get(
+        "/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {key}"}
+    )
     assert response.status_code == 503
     assert response.json() == {
         "detail": "Keycloak authorization unavailable",
@@ -825,8 +836,16 @@ def test_permissions_allows_only_api_key_admin_to_target_another_user(
 
 
 def test_validate_401_is_recorded_in_aggregate_metrics(client: TestClient) -> None:
-    assert client.get("/validate", headers={"x-api-key": "not-a-valid-key"}).status_code == 401
+    assert (
+        client.get(
+            "/validate/neurwerk", headers={"X-Neurwerk-Authorization": "Bearer not-a-valid-key"}
+        ).status_code
+        == 401
+    )
 
     metrics = client.get("/metrics")
     assert metrics.status_code == 200
-    assert 'http_requests_total{handler="/validate",method="GET",status="401"} 1.0' in metrics.text
+    assert (
+        'http_requests_total{handler="/validate/neurwerk",method="GET",status="401"} 1.0'
+        in metrics.text
+    )
