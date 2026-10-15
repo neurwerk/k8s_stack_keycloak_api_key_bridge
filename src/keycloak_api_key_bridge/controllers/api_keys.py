@@ -285,19 +285,6 @@ def list_api_keys(
     return ApiKey.list_keys(db, target_user_id, max_keys_per_user)
 
 
-@router.get("/validate")
-@router.post("/validate")
-def validate_key(
-    request: Request,
-    x_api_key: Annotated[str | None, Header(alias="x-api-key")] = None,
-    db: Session = Depends(get_db),
-    kc: KeycloakClient | None = Depends(get_kc_client),
-    managed_api_keys: ManagedApiKeyValidator = Depends(get_managed_api_keys),
-) -> JSONResponse:
-    """Validate a credential and return a versioned trusted authorization decision."""
-    return _validation_response(request, db, kc, managed_api_keys, x_api_key=x_api_key)
-
-
 @router.get("/validate/neurwerk")
 @router.post("/validate/neurwerk")
 def validate_neurwerk_key(
@@ -328,15 +315,11 @@ def _validation_response(
     kc: KeycloakClient | None,
     managed_api_keys: ManagedApiKeyValidator,
     *,
-    mode: Literal["legacy", "neurwerk", "proxy"] = "legacy",
-    x_api_key: str | None = None,
+    mode: Literal["neurwerk", "proxy"],
 ) -> JSONResponse:
     """Share key validation and error serialization across explicit credential modes."""
     try:
-        if mode == "legacy":
-            key_value = x_api_key or _bearer_api_key(request)
-        else:
-            key_value = _dedicated_api_key(request, mode)
+        key_value = _dedicated_api_key(request, mode)
         return _validate_key(request, key_value, db, kc, managed_api_keys)
     except HTTPException as exc:
         return JSONResponse(
@@ -392,11 +375,6 @@ def _validate_key(
         groups=sorted(entitlements.groups),
         account_email=entitlements.account_email,
     )
-
-
-def _bearer_api_key(request: Request) -> str | None:
-    authorization = request.headers.get("authorization", "")
-    return authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else None
 
 
 def _dedicated_api_key(request: Request, mode: Literal["neurwerk", "proxy"]) -> str:

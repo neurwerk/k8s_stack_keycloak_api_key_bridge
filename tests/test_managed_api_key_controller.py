@@ -88,10 +88,15 @@ def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> Non
     app.state.jwks_cache = AvailableJWKSCache()
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.get(
-            "/validate",
-            headers={"x-api-key": "managed-secret", "x-account-email": "creator@example.com"},
+            "/validate/neurwerk",
+            headers={
+                "X-Neurwerk-Authorization": "Bearer managed-secret",
+                "x-account-email": "creator@example.com",
+            },
         )
-        repeated = client.post("/validate", headers={"Authorization": "Bearer managed-secret"})
+        repeated = client.post(
+            "/validate/neurwerk", headers={"X-Neurwerk-Authorization": "Bearer managed-secret"}
+        )
         for method in ("GET", "POST"):
             for mode, header, value in (
                 ("neurwerk", "X-Neurwerk-Authorization", "Bearer managed-secret"),
@@ -164,7 +169,9 @@ def test_invalid_managed_verifier_returns_generic_unavailable_error(tmp_path: Pa
     app.state.keycloak_configured = True
     app.state.jwks_cache = AvailableJWKSCache()
     with TestClient(app, raise_server_exceptions=False) as client:
-        response = client.get("/validate", headers={"x-api-key": "managed-secret"})
+        response = client.get(
+            "/validate/neurwerk", headers={"X-Neurwerk-Authorization": "Bearer managed-secret"}
+        )
 
     assert response.status_code == 503
     assert "x-agentgateway-auth-context" not in response.headers
