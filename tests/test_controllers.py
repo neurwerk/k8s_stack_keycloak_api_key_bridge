@@ -292,9 +292,11 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
             "Authorization": "Bearer unrelated-key",
             "X-Neurwerk-Authorization": f"Bearer {key}",
             "Proxy-Authorization": "malformed",
+            "X-Request-ID": "gateway_request-1",
         },
     )
     assert validated.status_code == 200, validated.text
+    assert validated.headers["x-request-id"] == "gateway_request-1"
     assert validated.json() == {
         "contract_version": 1,
         "credential": {
@@ -382,7 +384,11 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
             assert response.status_code == 503
             assert response.json() == {
                 "detail": "Authorization context unavailable",
-                "error": {"message": "Authorization context unavailable"},
+                "error": {
+                    "message": "Authorization context unavailable",
+                    "code": "authentication_unavailable",
+                    "request_id": response.headers["x-request-id"],
+                },
             }
             assert "x-agentgateway-auth-context" not in response.headers
         else:
@@ -579,7 +585,11 @@ def test_explicit_validation_rejects_ambiguous_input_without_fallback(
         assert response.status_code == 401
         assert response.json() == {
             "detail": "Invalid authentication credentials",
-            "error": {"message": "Invalid authentication credentials"},
+            "error": {
+                "message": "Invalid authentication credentials",
+                "code": "authentication_failed",
+                "request_id": response.headers["x-request-id"],
+            },
         }
         assert "x-agentgateway-auth-context" not in response.headers
     # A syntactically valid unknown key or signed OIDC token is not an identity.
@@ -592,7 +602,11 @@ def test_explicit_validation_rejects_ambiguous_input_without_fallback(
         assert response.status_code == 401
         assert response.json() == {
             "detail": "Invalid or expired key",
-            "error": {"message": "Invalid or expired key"},
+            "error": {
+                "message": "Invalid or expired key",
+                "code": "authentication_failed",
+                "request_id": response.headers["x-request-id"],
+            },
         }
         assert unknown not in response.text + caplog.text
     assert key not in caplog.text
@@ -637,40 +651,76 @@ def test_create_rejects_permissions_not_in_live_entitlements(
 
 
 def test_validate_uses_401_for_disabled_principal_and_503_for_keycloak_outage(
-    client: TestClient,
+    client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
     created = client.post(
         "/api_keys", json={"name": "cli", "permissions": ["llm:invoke"], "expires_in_days": 30}
     )
     key = created.json()["api_key"]
     for method, headers, detail in (
-        ("GET", {}, "Invalid authentication credentials"),
-        ("POST", {"X-Neurwerk-Authorization": "Bearer unknown-key"}, "Invalid or expired key"),
+        ("GET", {"x-request-id": "invalid id"}, "Invalid authentication credentials"),
+        (
+            "POST",
+            {"X-Neurwerk-Authorization": "Bearer unknown-key", "x-request-id": "gateway_request-1"},
+            "Invalid or expired key",
+        ),
     ):
         response = client.request(method, "/validate/neurwerk", headers=headers)
         assert response.status_code == 401
-        assert response.json() == {"detail": detail, "error": {"message": detail}}
+        request_id = response.headers["x-request-id"]
+        if method == "POST":
+            assert request_id == "gateway_request-1"
+        else:
+            assert uuid.UUID(request_id).hex == request_id
+        assert response.json() == {
+            "detail": detail,
+            "error": {
+                "message": detail,
+                "code": "authentication_failed",
+                "request_id": request_id,
+            },
+        }
+        assert f"request_id={request_id} code=authentication_failed status=401" in caplog.text
         assert "x-agentgateway-auth-context" not in response.headers
     client.app.state.kc_client.entitlements["user-a"] = None
     response = client.get(
-        "/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {key}"}
+        "/validate/neurwerk",
+        headers=[
+            ("X-Neurwerk-Authorization", f"Bearer {key}"),
+            ("x-request-id", "first"),
+            ("x-request-id", "second"),
+        ],
     )
     assert response.status_code == 401
     assert response.json() == {
         "detail": "Keycloak principal is unavailable",
-        "error": {"message": "Keycloak principal is unavailable"},
+        "error": {
+            "message": "Keycloak principal is unavailable",
+            "code": "authentication_failed",
+            "request_id": response.headers["x-request-id"],
+        },
     }
+    assert uuid.UUID(response.headers["x-request-id"]).hex == response.headers["x-request-id"]
     assert "x-agentgateway-auth-context" not in response.headers
 
     client.app.state.kc_client.failure = True
     response = client.get(
-        "/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {key}"}
+        "/validate/neurwerk",
+        headers={"X-Neurwerk-Authorization": f"Bearer {key}", "x-request-id": "x" * 65},
     )
     assert response.status_code == 503
     assert response.json() == {
         "detail": "Keycloak authorization unavailable",
-        "error": {"message": "Keycloak authorization unavailable"},
+        "error": {
+            "message": "Keycloak authorization unavailable",
+            "code": "authentication_unavailable",
+            "request_id": response.headers["x-request-id"],
+        },
     }
+    request_id = response.headers["x-request-id"]
+    assert uuid.UUID(request_id).hex == request_id
+    assert f"request_id={request_id} code=authentication_unavailable status=503" in caplog.text
+    assert key not in caplog.text
     assert "x-agentgateway-auth-context" not in response.headers
 
 

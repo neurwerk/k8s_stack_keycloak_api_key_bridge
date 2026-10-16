@@ -318,15 +318,36 @@ def _validation_response(
     mode: Literal["neurwerk", "proxy"],
 ) -> JSONResponse:
     """Share key validation and error serialization across explicit credential modes."""
+    request_ids = request.headers.getlist("x-request-id")
+    request_id = (
+        request_ids[0]
+        if len(request_ids) == 1 and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request_ids[0])
+        else uuid.uuid4().hex
+    )
     try:
         key_value = _dedicated_api_key(request, mode)
-        return _validate_key(request, key_value, db, kc, managed_api_keys)
+        response = _validate_key(request, key_value, db, kc, managed_api_keys)
     except HTTPException as exc:
-        return JSONResponse(
+        code = {
+            401: "authentication_failed",
+            503: "authentication_unavailable",
+        }.get(exc.status_code, "authentication_failed")
+        logger.warning(
+            "Key validation rejected request_id=%s code=%s status=%d",
+            request_id,
+            code,
+            exc.status_code,
+        )
+        response = JSONResponse(
             status_code=exc.status_code,
-            content={"detail": exc.detail, "error": {"message": str(exc.detail)}},
+            content={
+                "detail": exc.detail,
+                "error": {"message": str(exc.detail), "code": code, "request_id": request_id},
+            },
             headers=exc.headers,
         )
+    response.headers["x-request-id"] = request_id
+    return response
 
 
 def _validate_key(
