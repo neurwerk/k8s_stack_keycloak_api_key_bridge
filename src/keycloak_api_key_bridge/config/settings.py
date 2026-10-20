@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     max_keys_per_user: int = Field(default=20, ge=1, le=100)
 
     managed_registrations: list[ManagedRegistration] = Field(default_factory=list)
+    gateway_caller_oidc_clients: list[str] = Field(default_factory=lambda: ["agentgateway"])
 
     host: str = "0.0.0.0"
     port: int = 8000
