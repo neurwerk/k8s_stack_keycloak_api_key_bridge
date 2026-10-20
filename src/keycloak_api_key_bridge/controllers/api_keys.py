@@ -105,6 +105,20 @@ def get_current_user(
     authorization: Annotated[str | None, Header()] = None,
 ) -> CurrentUser:
     """Validate a management JWT and return its stable realm-role identity."""
+    payload = _verified_token(request, authorization, request.app.state.auth_info.client_id)
+    user_id = payload.get("sub")
+    if not isinstance(user_id, str) or not user_id:
+        raise HTTPException(status_code=401, detail="Token missing 'sub' claim")
+    realm_access = payload.get("realm_access")
+    roles = realm_access.get("roles", []) if isinstance(realm_access, dict) else []
+    return CurrentUser(
+        user_id=user_id,
+        realm_roles=frozenset(role for role in roles if isinstance(role, str)),
+    )
+
+
+def _verified_token(request: Request, authorization: str | None, audience: str) -> dict:
+    """Verify a signed Keycloak token for one audience."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     cache = request.app.state.jwks_cache
@@ -130,21 +144,49 @@ def get_current_user(
             token,
             signing_key,
             algorithms=["RS256"],
-            audience=request.app.state.auth_info.client_id,
+            audience=audience,
             issuer=request.app.state.auth_info.issuer,
             options={"require_aud": True, "require_exp": True, "require_iat": True},
         )
     except JWTError as exc:
         raise HTTPException(status_code=401, detail="Invalid token") from exc
-    user_id = payload.get("sub")
-    if not isinstance(user_id, str) or not user_id:
-        raise HTTPException(status_code=401, detail="Token missing 'sub' claim")
-    realm_access = payload.get("realm_access")
-    roles = realm_access.get("roles", []) if isinstance(realm_access, dict) else []
-    return CurrentUser(
-        user_id=user_id,
-        realm_roles=frozenset(role for role in roles if isinstance(role, str)),
-    )
+    return payload
+
+
+@router.post("/gateway/caller-permissions")
+def gateway_caller_permissions(
+    request: Request,
+    db: Session = Depends(get_db),
+    kc: KeycloakClient | None = Depends(get_kc_client),
+    managed_api_keys: ManagedApiKeyValidator = Depends(get_managed_api_keys),
+) -> dict[str, list[str]]:
+    """Return effective permissions for a key or a verified gateway-audience token."""
+    if "x-neurwerk-authorization" in request.headers:
+        credential = _dedicated_api_key(request, "neurwerk")
+        try:
+            decision = _validate_key(request, credential, db, kc, managed_api_keys)
+            return {"permissions": json.loads(bytes(decision.body))["permissions"]}
+        except HTTPException as exc:
+            if exc.status_code != 401 or exc.detail != "Invalid or expired key":
+                raise
+        authorization = f"Bearer {credential}"
+    else:
+        values = request.headers.getlist("authorization")
+        authorization = values[0] if len(values) == 1 else None
+    payload = _verified_token(request, authorization, "agentgateway")
+    if not isinstance(payload.get("sub"), str) or not payload["sub"]:
+        raise HTTPException(status_code=401, detail="Invalid gateway identity")
+    azp = payload.get("azp")
+    if not isinstance(azp, str) or azp not in request.app.state.gateway_caller_oidc_clients:
+        raise HTTPException(status_code=403, detail="Client not approved for gateway access")
+    access = payload.get("resource_access")
+    gateway = access.get("agentgateway") if isinstance(access, dict) else None
+    roles = gateway.get("roles") if isinstance(gateway, dict) else None
+    if not isinstance(roles, list) or not all(
+        isinstance(role, str) and is_valid_permission(role) for role in roles
+    ):
+        raise HTTPException(status_code=403, detail="Invalid gateway permissions")
+    return {"permissions": sorted({role for role in roles if isinstance(role, str)})}
 
 
 def _resolve_target_user_id(

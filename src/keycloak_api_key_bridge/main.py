@@ -71,6 +71,7 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
     app.state.auth_info = build_auth_info(settings)
     app.state.max_keys_per_user = settings.max_keys_per_user
     app.state.managed_api_keys = ManagedApiKeyValidator(settings.managed_registrations)
+    app.state.gateway_caller_oidc_clients = frozenset(settings.gateway_caller_oidc_clients)
 
     # ── Singleton KeycloakClient ──────────────────────────────────────────
     # Created once at startup so the admin token (client_credentials) is cached
