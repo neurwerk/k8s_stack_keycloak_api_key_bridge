@@ -173,20 +173,23 @@ def gateway_caller_permissions(
     else:
         values = request.headers.getlist("authorization")
         authorization = values[0] if len(values) == 1 else None
-    payload = _verified_token(request, authorization, "agentgateway")
+    client_id = request.app.state.agentgateway_client_id
+    payload = _verified_token(request, authorization, client_id)
     if not isinstance(payload.get("sub"), str) or not payload["sub"]:
         raise HTTPException(status_code=401, detail="Invalid gateway identity")
     azp = payload.get("azp")
     if not isinstance(azp, str) or azp not in request.app.state.gateway_caller_oidc_clients:
         raise HTTPException(status_code=403, detail="Client not approved for gateway access")
-    access = payload.get("resource_access")
-    gateway = access.get("agentgateway") if isinstance(access, dict) else None
-    roles = gateway.get("roles") if isinstance(gateway, dict) else None
-    if not isinstance(roles, list) or not all(
-        isinstance(role, str) and is_valid_permission(role) for role in roles
-    ):
+    access = payload.get("resource_access", {})
+    if not isinstance(access, dict):
         raise HTTPException(status_code=403, detail="Invalid gateway permissions")
-    return {"permissions": sorted({role for role in roles if isinstance(role, str)})}
+    gateway = access.get(client_id, {})
+    if not isinstance(gateway, dict):
+        raise HTTPException(status_code=403, detail="Invalid gateway permissions")
+    roles = gateway.get("roles", [])
+    if not isinstance(roles, list) or not all(isinstance(role, str) for role in roles):
+        raise HTTPException(status_code=403, detail="Invalid gateway permissions")
+    return {"permissions": sorted({role for role in roles if is_valid_permission(role)})}
 
 
 def _resolve_target_user_id(
