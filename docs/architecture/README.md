@@ -43,8 +43,8 @@ Unreadable, incomplete, malformed, or duplicate active verifier configuration ca
 | `GET /api_keys?user_id=…` | Management JWT; bounded metadata list, with the same target rule. |
 | `POST /api_keys` | Management JWT; creates a personal key and returns its secret once. |
 | `POST /api_keys/{key_id}/revoke` | Management JWT; owner or `api-key-admin` deletes the key. |
-| `GET` or `POST /validate/neurwerk` | Exactly one `X-Neurwerk-Authorization: Bearer <key>` header. No provider-header fallback. |
-| `GET` or `POST /validate/proxy` | Exactly one `Proxy-Authorization: Basic …` header. The decoded password is the key; a nonempty username is required but never selects identity. |
+| `GET`, `POST` or `DELETE /validate/neurwerk` | Exactly one `X-Neurwerk-Authorization: Bearer <key>` header. No provider-header fallback. |
+| `GET`, `POST` or `DELETE /validate/proxy` | Exactly one `Proxy-Authorization: Basic …` header. The decoded password is the key; a nonempty username is required but never selects identity. |
 | `POST /gateway/caller-permissions` | Returns effective key permissions or verified gateway-audience JWT roles for Studio discovery. |
 
 Both validation routes return credential and principal metadata, permissions, groups, email, and `x-agentgateway-auth-context` for the gateway. Headers are bounded; duplicate or malformed identity headers are rejected. The application does not require a second workload credential for these routes. The deployment and gateway own network exposure and trusted-header handling. There is no `/validate` route.
