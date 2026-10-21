@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -61,7 +62,10 @@ class Settings(BaseSettings):
     max_keys_per_user: int = Field(default=20, ge=1, le=100)
 
     managed_registrations: list[ManagedRegistration] = Field(default_factory=list)
-    gateway_caller_oidc_clients: list[str] = Field(default_factory=lambda: ["agentgateway"])
+    gateway_caller_oidc_clients_by_binding: dict[
+        Annotated[str, Field(strict=True, min_length=1)],
+        list[Annotated[str, Field(strict=True, min_length=1)]],
+    ] = Field(default_factory=dict)
 
     host: str = "0.0.0.0"
     port: int = 8000

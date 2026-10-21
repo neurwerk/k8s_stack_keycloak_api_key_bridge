@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from jose import jwt
 
 from keycloak_api_key_bridge.config.database import ApiKey
-from keycloak_api_key_bridge.config.settings import AuthInfo
+from keycloak_api_key_bridge.config.settings import AuthInfo, Settings
 from keycloak_api_key_bridge.controllers.api_keys import CurrentUser, get_current_user
 from keycloak_api_key_bridge.lib.keycloak import (
     KeycloakClient,
@@ -206,7 +206,16 @@ def client() -> Generator[TestClient, None, None]:
 @pytest.fixture
 def jwt_client() -> Generator[TestClient, None, None]:
     """Return a bridge client that verifies signed tokens through the real dependency."""
-    app = create_app(database_url="sqlite://")
+    app = create_app(
+        database_url="sqlite://",
+        settings=Settings(
+            gateway_caller_oidc_clients_by_binding={
+                "binding-a": ["external-a"],
+                "binding-b": ["external-b"],
+                "first-party-only": [],
+            }
+        ),
+    )
     app.state.auth_info = AuthInfo(
         _KEYCLOAK_URL,
         "test",
@@ -232,6 +241,115 @@ def test_management_jwt_rejects_missing_or_wrong_audience(
         "/me", headers=_authorization_header(_management_token(audience=audience))
     )
     assert response.status_code == 401
+
+
+def _gateway_token(azp: str, audience: str | list[str] | None = "agentgateway") -> str:
+    claims = jwt.get_unverified_claims(_management_token(audience=audience, azp=azp))
+    claims["resource_access"] = {
+        "agentgateway": {"roles": ["model:example:invoke", "llm:invoke", "invalid"]}
+    }
+    return jwt.encode(claims, _SIGNING_KEY, algorithm="RS256", headers={"kid": "test-kid"})
+
+
+@pytest.mark.parametrize("header", ["Authorization", "X-Neurwerk-Authorization"])
+def test_discovery_oidc_client_is_binding_scoped(jwt_client: TestClient, header: str) -> None:
+    headers = {header: f"Bearer {_gateway_token('external-a')}"}
+    allowed = jwt_client.post(
+        "/gateway/caller-permissions", json={"binding_id": "binding-a"}, headers=headers
+    )
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json() == {"permissions": ["llm:invoke", "model:example:invoke"]}
+    for binding in ("binding-b", "first-party-only", "unknown", "disabled"):
+        denied = jwt_client.post(
+            "/gateway/caller-permissions", json={"binding_id": binding}, headers=headers
+        )
+        assert denied.status_code == 403
+
+
+def test_discovery_preserves_first_party_and_gateway_audience(jwt_client: TestClient) -> None:
+    for binding in ("binding-a", "binding-b", "first-party-only"):
+        response = jwt_client.post(
+            "/gateway/caller-permissions",
+            json={"binding_id": binding},
+            headers=_authorization_header(_gateway_token("agentgateway")),
+        )
+        assert response.status_code == 200
+    for audience in (None, _BRIDGE_AUDIENCE):
+        response = jwt_client.post(
+            "/gateway/caller-permissions",
+            json={"binding_id": "binding-a"},
+            headers=_authorization_header(_gateway_token("external-a", audience)),
+        )
+        assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        None,
+        {},
+        {"binding_id": 1},
+        {"binding_id": ""},
+        {"binding_id": "binding-b", "client_id": "external-b"},
+        {"binding_id": "binding-a", "extra": True},
+    ],
+)
+def test_discovery_requires_strict_binding_body(jwt_client: TestClient, body: object) -> None:
+    response = jwt_client.post(
+        "/gateway/caller-permissions",
+        json=body,
+        headers=_authorization_header(_gateway_token("external-a")),
+    )
+    assert response.status_code == 422
+
+
+def test_discovery_requires_json_content_type_and_ignores_client_spoofing(
+    jwt_client: TestClient,
+) -> None:
+    headers = _authorization_header(_gateway_token("external-a"))
+    response = jwt_client.post(
+        "/gateway/caller-permissions",
+        content='{"binding_id":"binding-a"}',
+        headers=headers,
+    )
+    assert response.status_code == 422
+    response = jwt_client.post(
+        "/gateway/caller-permissions",
+        content='{"binding_id":"binding-a"}',
+        headers={**headers, "Content-Type": "application/problem+json"},
+    )
+    assert response.status_code == 415
+    denied = jwt_client.post(
+        "/gateway/caller-permissions?client_id=external-b&azp=external-b",
+        json={"binding_id": "binding-b"},
+        headers={**headers, "x-client-id": "external-b", "x-azp": "external-b"},
+    )
+    assert denied.status_code == 403
+
+
+def test_discovery_key_keeps_grant_intersection_and_revocation(client: TestClient) -> None:
+    client.app.state.gateway_caller_oidc_clients_by_binding = {"binding-a": frozenset()}
+    created = client.post(
+        "/api_keys",
+        json={"name": "discovery", "permissions": ["llm:invoke"], "expires_in_days": 1},
+    )
+    assert created.status_code == 200
+    headers = {"X-Neurwerk-Authorization": f"Bearer {created.json()['api_key']}"}
+
+    def discover() -> httpx.Response:
+        return client.post(
+            "/gateway/caller-permissions", json={"binding_id": "binding-a"}, headers=headers
+        )
+
+    allowed = discover()
+    assert allowed.status_code == 200
+    assert allowed.json() == {"permissions": ["llm:invoke"]}
+    client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
+        frozenset(), frozenset()
+    )
+    assert discover().json() == {"permissions": []}
+    assert client.post(f"/api_keys/{created.json()['id']}/revoke").status_code == 200
+    assert discover().status_code == 401
 
 
 @pytest.mark.parametrize(

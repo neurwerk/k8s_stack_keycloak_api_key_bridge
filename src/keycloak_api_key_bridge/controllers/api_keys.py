@@ -16,7 +16,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from jose import JWTError, jwt
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
 from keycloak_api_key_bridge.config.database import ApiKey, ApiKeyLimitError
@@ -153,14 +153,31 @@ def _verified_token(request: Request, authorization: str | None, audience: str) 
     return payload
 
 
+class GatewayCallerPermissionsRequest(BaseModel):
+    """Select an enabled discovery binding, never a caller-supplied OIDC client."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    binding_id: str = Field(min_length=1)
+
+
 @router.post("/gateway/caller-permissions")
 def gateway_caller_permissions(
     request: Request,
+    body: GatewayCallerPermissionsRequest,
     db: Session = Depends(get_db),
     kc: KeycloakClient | None = Depends(get_kc_client),
     managed_api_keys: ManagedApiKeyValidator = Depends(get_managed_api_keys),
 ) -> dict[str, list[str]]:
     """Return effective permissions for a key or a verified gateway-audience token."""
+    if (
+        request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        != "application/json"
+    ):
+        raise HTTPException(status_code=415, detail="Content-Type must be application/json")
+    approved_clients = request.app.state.gateway_caller_oidc_clients_by_binding.get(body.binding_id)
+    if approved_clients is None:
+        raise HTTPException(status_code=403, detail="Unknown or disabled discovery binding")
     if "x-neurwerk-authorization" in request.headers:
         credential = _dedicated_api_key(request, "neurwerk")
         try:
@@ -178,7 +195,7 @@ def gateway_caller_permissions(
     if not isinstance(payload.get("sub"), str) or not payload["sub"]:
         raise HTTPException(status_code=401, detail="Invalid gateway identity")
     azp = payload.get("azp")
-    if not isinstance(azp, str) or azp not in request.app.state.gateway_caller_oidc_clients:
+    if not isinstance(azp, str) or (azp != client_id and azp not in approved_clients):
         raise HTTPException(status_code=403, detail="Client not approved for gateway access")
     access = payload.get("resource_access", {})
     if not isinstance(access, dict):
