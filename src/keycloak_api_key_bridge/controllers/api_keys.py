@@ -349,6 +349,7 @@ def list_api_keys(
 
 @router.get("/validate/neurwerk")
 @router.post("/validate/neurwerk")
+@router.delete("/validate/neurwerk")
 def validate_neurwerk_key(
     request: Request,
     db: Session = Depends(get_db),
@@ -361,6 +362,7 @@ def validate_neurwerk_key(
 
 @router.get("/validate/proxy")
 @router.post("/validate/proxy")
+@router.delete("/validate/proxy")
 def validate_proxy_key(
     request: Request,
     db: Session = Depends(get_db),

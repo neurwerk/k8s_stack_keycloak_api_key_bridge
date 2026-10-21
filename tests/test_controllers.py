@@ -561,7 +561,7 @@ def test_validate_returns_current_groups_and_trusted_owner_email(
         AuthInfo(_KEYCLOAK_URL, "test", "bridge", "test-secret"),
         client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
-    for method in ("GET", "POST"):
+    for method in ("GET", "POST", "DELETE"):
         response = client.request(
             method,
             "/validate/neurwerk?account_email=caller@example.com&user_id=user-b",
@@ -587,7 +587,7 @@ def test_validate_returns_current_groups_and_trusted_owner_email(
 
 
 @pytest.mark.parametrize("mode", ["neurwerk", "proxy"])
-@pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.parametrize("method", ["GET", "POST", "DELETE"])
 def test_explicit_validation_preserves_owner_grants_and_revocation(
     client: TestClient, caplog: pytest.LogCaptureFixture, mode: str, method: str
 ) -> None:
@@ -647,12 +647,50 @@ def test_explicit_validation_preserves_owner_grants_and_revocation(
     assert client.request(method, f"/validate/{mode}", headers=headers).json()[
         "permissions"
     ] == sorted(grant[:-1])
+    client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
+        frozenset(), frozenset()
+    )
+    denied = client.request(method, f"/validate/{mode}", headers=headers)
+    assert denied.status_code == 200
+    assert denied.json()["permissions"] == []
+    assert json.loads(denied.headers["x-agentgateway-auth-context"])["permissions"] == []
     assert client.post(f"/api_keys/{created.json()['id']}/revoke").status_code == 200
-    assert client.request(method, f"/validate/{mode}", headers=headers).status_code == 401
+    revoked = client.request(method, f"/validate/{mode}", headers=headers)
+    assert revoked.status_code == 401
+    assert "x-agentgateway-auth-context" not in revoked.headers
+
+    with client.app.state.db_factory() as session:
+        _, expired_key = ApiKey.create_key(
+            session, name="expired", user_id="user-a", permissions=grant, validity_days=-1
+        )
+    expired = client.request(
+        method, f"/validate/{mode}", headers=dict([_dedicated_header(mode, expired_key)])
+    )
+    assert expired.status_code == 401
+    assert expired.json()["detail"] == "Invalid or expired key"
+    assert "x-agentgateway-auth-context" not in expired.headers
 
 
 @pytest.mark.parametrize("mode", ["neurwerk", "proxy"])
-@pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.parametrize("method", ["PUT", "PATCH", "OPTIONS", "HEAD"])
+def test_explicit_validation_rejects_unsupported_methods(
+    client: TestClient, mode: str, method: str
+) -> None:
+    created = client.post(
+        "/api_keys", json={"name": "method", "permissions": ["llm:invoke"], "expires_in_days": 1}
+    )
+    assert created.status_code == 200
+    response = client.request(
+        method,
+        f"/validate/{mode}",
+        headers=dict([_dedicated_header(mode, created.json()["api_key"])]),
+    )
+    assert response.status_code == 405
+    assert "x-agentgateway-auth-context" not in response.headers
+
+
+@pytest.mark.parametrize("mode", ["neurwerk", "proxy"])
+@pytest.mark.parametrize("method", ["GET", "POST", "DELETE"])
 def test_explicit_validation_rejects_ambiguous_input_without_fallback(
     client: TestClient, caplog: pytest.LogCaptureFixture, mode: str, method: str
 ) -> None:
