@@ -97,7 +97,7 @@ def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> Non
         repeated = client.post(
             "/validate/neurwerk", headers={"X-Neurwerk-Authorization": "Bearer managed-secret"}
         )
-        for method in ("GET", "POST"):
+        for method in ("GET", "POST", "DELETE"):
             for mode, header, value in (
                 ("neurwerk", "X-Neurwerk-Authorization", "Bearer managed-secret"),
                 (
