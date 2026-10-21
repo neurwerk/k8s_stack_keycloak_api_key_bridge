@@ -71,7 +71,10 @@ def create_app(database_url: str | None = None, settings: Settings | None = None
     app.state.auth_info = build_auth_info(settings)
     app.state.max_keys_per_user = settings.max_keys_per_user
     app.state.managed_api_keys = ManagedApiKeyValidator(settings.managed_registrations)
-    app.state.gateway_caller_oidc_clients = frozenset(settings.gateway_caller_oidc_clients)
+    app.state.gateway_caller_oidc_clients_by_binding = {
+        binding_id: frozenset(clients)
+        for binding_id, clients in settings.gateway_caller_oidc_clients_by_binding.items()
+    }
     app.state.agentgateway_client_id = settings.agentgateway_client_id
 
     # ── Singleton KeycloakClient ──────────────────────────────────────────
