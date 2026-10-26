@@ -109,6 +109,81 @@ def _authorization_header(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def test_usage_metadata_matches_owned_keys_and_returns_only_display_fields(jwt_client):
+    with jwt_client.app.state.db_factory() as session:
+        own, _ = ApiKey.create_key(session, "my-key", "user-a", ["llm:invoke"], 30)
+        foreign, _ = ApiKey.create_key(session, "private-name", "user-b", ["llm:invoke"], 30)
+    references = [
+        {"id": own, "user_id": "user-a", "kind": "personal"},
+        {"id": foreign, "user_id": "user-a", "kind": "personal"},
+        {"id": "missing", "user_id": "user-a", "kind": "personal"},
+    ]
+    response = jwt_client.post(
+        "/usage/key-metadata",
+        json={"keys": references},
+        headers=_authorization_header(_management_token()),
+    )
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == [{**references[0], "name": "my-key"}]
+    assert "private-name" not in response.text
+    admin = _authorization_header(_management_token(roles=["langfuse-admin"]))
+    response = jwt_client.post(
+        "/usage/key-metadata",
+        headers=admin,
+        json={"keys": [references[1], {**references[1], "user_id": "user-b"}]},
+    )
+    assert response.json() == [{**references[1], "user_id": "user-b", "name": "private-name"}]
+
+
+@pytest.mark.parametrize("roles", [[], ["api-key-admin"]])
+@pytest.mark.parametrize(
+    "reference",
+    [
+        {"id": "key", "user_id": "user-b", "kind": "personal"},
+        {"id": "key", "user_id": "user-a", "kind": "managed"},
+    ],
+)
+def test_usage_metadata_does_not_grant_cross_owner_or_managed_access(jwt_client, roles, reference):
+    response = jwt_client.post(
+        "/usage/key-metadata",
+        json={"keys": [reference]},
+        headers=_authorization_header(_management_token(roles=roles)),
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Authorization": "Bearer invalid"},
+        _authorization_header(_management_token(audience="wrong")),
+        _authorization_header(_management_token(expires_in_seconds=-60)),
+    ],
+)
+def test_usage_metadata_requires_valid_jwt_even_for_empty_lookup(jwt_client, headers):
+    assert (
+        jwt_client.post("/usage/key-metadata", json={"keys": []}, headers=headers).status_code
+        == 401
+    )
+
+
+@pytest.mark.parametrize("size,status", [(500, 200), (501, 422)])
+def test_usage_metadata_bounds_batch_size(jwt_client, size, status):
+    references = [
+        {"id": str(index), "user_id": "user-a", "kind": "personal"} for index in range(size)
+    ]
+    response = jwt_client.post(
+        "/usage/key-metadata",
+        json={"keys": references},
+        headers=_authorization_header(_management_token()),
+    )
+    assert response.status_code == status
+    if status == 200:
+        assert response.json() == []
+
+
 def _dedicated_header(mode: str, key: str, username: str = "user-b") -> tuple[str, str]:
     """Build a selected identity header with a deliberately mixed-case scheme."""
     if mode == "neurwerk":

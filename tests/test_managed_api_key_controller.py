@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from keycloak_api_key_bridge.config.settings import AuthInfo, ManagedRegistration, Settings
+from keycloak_api_key_bridge.controllers.api_keys import CurrentUser, get_current_user
 from keycloak_api_key_bridge.lib.keycloak import PrincipalEntitlements
 from keycloak_api_key_bridge.main import create_app
 
@@ -67,6 +68,97 @@ def write_grant(path: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def test_usage_names_follow_gateway_identity_owner_and_current_descriptor(tmp_path, monkeypatch):
+    grant = tmp_path / "grant.json"
+    verifier = tmp_path / "verifier.sha256"
+    write_grant(grant)
+    digest = hashlib.sha256(b"managed-secret").hexdigest()
+    verifier.write_text(digest)
+    app = create_app(
+        database_url="sqlite://",
+        settings=Settings(
+            managed_registrations=[
+                ManagedRegistration(grant_file=str(grant), verifier_file=str(verifier)),
+            ]
+        ),
+    )
+    app.state.auth_info = AuthInfo("", "", "", "")
+    app.state.kc_client = FakeKeycloakClient()
+    app.state.keycloak_configured = True
+    app.state.jwks_cache = AvailableJWKSCache()
+    app.dependency_overrides[get_current_user] = lambda: CurrentUser(
+        "reviewer", frozenset({"langfuse-admin"})
+    )
+    with TestClient(app) as client:
+        decision = client.get(
+            "/validate/neurwerk",
+            headers={
+                "X-Neurwerk-Authorization": "Bearer managed-secret",
+            },
+        )
+        assert decision.status_code == 200
+        context = json.loads(decision.headers["x-agentgateway-auth-context"])
+        reference = {
+            "id": context["credential_id"],
+            "user_id": context["principal_id"],
+            "kind": "managed",
+        }
+        raw_reference = {**reference, "id": decision.json()["credential"]["id"]}
+        response = client.post(
+            "/usage/key-metadata",
+            json={
+                "keys": [
+                    reference,
+                    {**reference, "user_id": "wrong-owner"},
+                    raw_reference,
+                ]
+            },
+        )
+        assert response.status_code == 200
+        assert response.json() == [{**reference, "name": "service-agentgateway"}]
+        verifier.write_text("")
+        assert client.post("/usage/key-metadata", json={"keys": [reference]}).json() == []
+        verifier.write_text(digest)
+        replacement = json.loads(grant.read_text())
+        replacement["principal"]["client_id"] = "replacement-client"
+        replacement["name"] = "replacement-key"
+        grant.write_text(json.dumps(replacement))
+        monkeypatch.setattr(
+            app.state.kc_client, "get_service_account_user_id", lambda _: "replacement-owner"
+        )
+        monkeypatch.setattr(
+            app.state.kc_client,
+            "get_principal_entitlements",
+            lambda _: PrincipalEntitlements(frozenset(_GRANT), frozenset()),
+        )
+        decision = client.get(
+            "/validate/neurwerk",
+            headers={
+                "X-Neurwerk-Authorization": "Bearer managed-secret",
+            },
+        )
+        assert decision.status_code == 200
+        context = json.loads(decision.headers["x-agentgateway-auth-context"])
+        new_reference = {
+            "id": context["credential_id"],
+            "user_id": context["principal_id"],
+            "kind": "managed",
+        }
+        assert new_reference["id"] != reference["id"]
+        response = client.post(
+            "/usage/key-metadata",
+            json={
+                "keys": [
+                    reference,
+                    {**reference, "user_id": "replacement-owner"},
+                    {**new_reference, "user_id": reference["user_id"]},
+                    new_reference,
+                ]
+            },
+        )
+        assert response.json() == [{**new_reference, "name": "replacement-key"}]
 
 
 def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> None:

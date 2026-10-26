@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from jose import JWTError, jwt
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import select, tuple_
 from sqlalchemy.orm import Session
 
 from keycloak_api_key_bridge.config.database import ApiKey, ApiKeyLimitError
@@ -347,6 +348,90 @@ def list_api_keys(
     return ApiKey.list_keys(db, target_user_id, max_keys_per_user)
 
 
+class UsageKeyReference(BaseModel):
+    """A non-secret key ID with its recorded principal and credential kind."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    id: str = Field(min_length=1, max_length=255)
+    user_id: str = Field(min_length=1, max_length=255)
+    kind: Literal["personal", "managed"]
+
+
+class UsageKeyMetadataRequest(BaseModel):
+    """Bound metadata work independently of the number of usage records."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    keys: list[UsageKeyReference] = Field(max_length=500)
+
+
+class UsageKeyMetadata(UsageKeyReference):
+    """Allowlisted display metadata, without prefixes, grants, hashes or secrets."""
+
+    name: str
+
+
+@router.post("/usage/key-metadata", response_model=list[UsageKeyMetadata])
+def usage_key_metadata(
+    body: UsageKeyMetadataRequest,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    managed_api_keys: Annotated[ManagedApiKeyValidator, Depends(get_managed_api_keys)],
+    kc: Annotated[KeycloakClient | None, Depends(get_kc_client)],
+) -> JSONResponse:
+    """Resolve exact owned IDs in bulk; usage administration grants no key management."""
+    is_admin = "langfuse-admin" in current_user.realm_roles
+    if not is_admin and any(
+        key.user_id != current_user.user_id or key.kind != "personal" for key in body.keys
+    ):
+        raise HTTPException(status_code=403, detail="Usage metadata is self-only")
+    personal_ids = {(key.id, key.user_id) for key in body.keys if key.kind == "personal"}
+    rows = db.execute(
+        select(ApiKey.id, ApiKey.user_id, ApiKey.name).where(
+            tuple_(ApiKey.id, ApiKey.user_id).in_(personal_ids)
+        )
+    ).all()
+    names = {(row.id, row.user_id, "personal"): row.name for row in rows}
+    if is_admin and any(key.kind == "managed" for key in body.keys):
+        names.update(_managed_usage_names(body.keys, managed_api_keys, kc))
+    result = [
+        UsageKeyMetadata(**key.model_dump(), name=names[(key.id, key.user_id, key.kind)])
+        for key in body.keys
+        if (key.id, key.user_id, key.kind) in names
+    ]
+    return JSONResponse(
+        content=[key.model_dump() for key in result], headers={"Cache-Control": "no-store"}
+    )
+
+
+def _managed_usage_names(
+    references: list[UsageKeyReference],
+    validator: ManagedApiKeyValidator,
+    kc: KeycloakClient | None,
+) -> dict[tuple[str, str, str], str]:
+    """Match current descriptors to normalized gateway IDs and actual service owners."""
+    if kc is None:
+        raise HTTPException(status_code=503, detail="Managed key metadata unavailable")
+    requested = {(key.id, key.user_id) for key in references if key.kind == "managed"}
+    owners: dict[str, str | None] = {}
+    names: dict[tuple[str, str, str], str] = {}
+    try:
+        for key in validator.metadata():
+            identity = key.context_credential_id
+            if not any(key_id == identity for key_id, _ in requested):
+                continue
+            client_id = key.principal_client_id
+            if client_id not in owners:
+                owners[client_id] = kc.get_service_account_user_id(client_id)
+            owner = owners[client_id]
+            if owner is not None and (identity, owner) in requested:
+                names[(identity, owner, "managed")] = key.name
+    except (ManagedApiKeyConfigurationError, KeycloakUnavailableError) as exc:
+        raise HTTPException(status_code=503, detail="Managed key metadata unavailable") from exc
+    return names
+
+
 @router.get("/validate/neurwerk")
 @router.post("/validate/neurwerk")
 @router.delete("/validate/neurwerk")
@@ -522,12 +607,7 @@ def _managed_key_response(
     return _decision_response(
         credential_id=managed_key.key_id,
         credential_kind="managed_api_key",
-        context_credential_id=str(
-            uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"keycloak-api-key-bridge/managed/{managed_key.principal_client_id}/{managed_key.key_id}",
-            )
-        ),
+        context_credential_id=managed_key.context_credential_id,
         credential_name=managed_key.name,
         expires_at=None,
         principal_kind="service_account",
