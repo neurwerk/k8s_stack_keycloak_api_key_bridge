@@ -378,6 +378,7 @@ def usage_key_metadata(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
     managed_api_keys: Annotated[ManagedApiKeyValidator, Depends(get_managed_api_keys)],
+    kc: Annotated[KeycloakClient | None, Depends(get_kc_client)],
 ) -> JSONResponse:
     """Resolve exact owned IDs in bulk; usage administration grants no key management."""
     is_admin = "langfuse-admin" in current_user.realm_roles
@@ -393,13 +394,7 @@ def usage_key_metadata(
     ).all()
     names = {(row.id, row.user_id, "personal"): row.name for row in rows}
     if is_admin and any(key.kind == "managed" for key in body.keys):
-        try:
-            managed_names = {key.key_id: key.name for key in managed_api_keys.metadata()}
-        except ManagedApiKeyConfigurationError as exc:
-            raise HTTPException(status_code=503, detail="Managed key metadata unavailable") from exc
-        for key in body.keys:
-            if key.kind == "managed" and key.id in managed_names:
-                names[(key.id, key.user_id, key.kind)] = managed_names[key.id]
+        names.update(_managed_usage_names(body.keys, managed_api_keys, kc))
     result = [
         UsageKeyMetadata(**key.model_dump(), name=names[(key.id, key.user_id, key.kind)])
         for key in body.keys
@@ -408,6 +403,33 @@ def usage_key_metadata(
     return JSONResponse(
         content=[key.model_dump() for key in result], headers={"Cache-Control": "no-store"}
     )
+
+
+def _managed_usage_names(
+    references: list[UsageKeyReference],
+    validator: ManagedApiKeyValidator,
+    kc: KeycloakClient | None,
+) -> dict[tuple[str, str, str], str]:
+    """Match current descriptors to normalized gateway IDs and actual service owners."""
+    if kc is None:
+        raise HTTPException(status_code=503, detail="Managed key metadata unavailable")
+    requested = {(key.id, key.user_id) for key in references if key.kind == "managed"}
+    owners: dict[str, str | None] = {}
+    names: dict[tuple[str, str, str], str] = {}
+    try:
+        for key in validator.metadata():
+            identity = key.context_credential_id
+            if not any(key_id == identity for key_id, _ in requested):
+                continue
+            client_id = key.principal_client_id
+            if client_id not in owners:
+                owners[client_id] = kc.get_service_account_user_id(client_id)
+            owner = owners[client_id]
+            if owner is not None and (identity, owner) in requested:
+                names[(identity, owner, "managed")] = key.name
+    except (ManagedApiKeyConfigurationError, KeycloakUnavailableError) as exc:
+        raise HTTPException(status_code=503, detail="Managed key metadata unavailable") from exc
+    return names
 
 
 @router.get("/validate/neurwerk")
@@ -585,12 +607,7 @@ def _managed_key_response(
     return _decision_response(
         credential_id=managed_key.key_id,
         credential_kind="managed_api_key",
-        context_credential_id=str(
-            uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"keycloak-api-key-bridge/managed/{managed_key.principal_client_id}/{managed_key.key_id}",
-            )
-        ),
+        context_credential_id=managed_key.context_credential_id,
         credential_name=managed_key.name,
         expires_at=None,
         principal_kind="service_account",

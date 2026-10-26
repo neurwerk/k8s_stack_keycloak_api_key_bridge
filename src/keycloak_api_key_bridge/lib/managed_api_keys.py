@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import re
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,16 @@ class ManagedApiKey:
     name: str
     principal_client_id: str
     permissions: tuple[str, ...]
+
+    @property
+    def context_credential_id(self) -> str:
+        """Use the gateway identity namespace, including the owning client."""
+        return str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"keycloak-api-key-bridge/managed/{self.principal_client_id}/{self.key_id}",
+            )
+        )
 
 
 @dataclass(frozen=True)
