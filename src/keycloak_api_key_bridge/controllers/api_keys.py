@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from jose import JWTError, jwt
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import select, tuple_
 from sqlalchemy.orm import Session
 
 from keycloak_api_key_bridge.config.database import ApiKey, ApiKeyLimitError
@@ -345,6 +346,68 @@ def list_api_keys(
     """List a bounded set of keys for the caller or an authorized target user."""
     target_user_id, _ = _resolve_target_user_id(query_user_id, current_user)
     return ApiKey.list_keys(db, target_user_id, max_keys_per_user)
+
+
+class UsageKeyReference(BaseModel):
+    """A non-secret key ID with its recorded principal and credential kind."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    id: str = Field(min_length=1, max_length=255)
+    user_id: str = Field(min_length=1, max_length=255)
+    kind: Literal["personal", "managed"]
+
+
+class UsageKeyMetadataRequest(BaseModel):
+    """Bound metadata work independently of the number of usage records."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    keys: list[UsageKeyReference] = Field(max_length=500)
+
+
+class UsageKeyMetadata(UsageKeyReference):
+    """Allowlisted display metadata, without prefixes, grants, hashes or secrets."""
+
+    name: str
+
+
+@router.post("/usage/key-metadata", response_model=list[UsageKeyMetadata])
+def usage_key_metadata(
+    body: UsageKeyMetadataRequest,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    managed_api_keys: Annotated[ManagedApiKeyValidator, Depends(get_managed_api_keys)],
+) -> JSONResponse:
+    """Resolve exact owned IDs in bulk; usage administration grants no key management."""
+    is_admin = "langfuse-admin" in current_user.realm_roles
+    if not is_admin and any(
+        key.user_id != current_user.user_id or key.kind != "personal" for key in body.keys
+    ):
+        raise HTTPException(status_code=403, detail="Usage metadata is self-only")
+    personal_ids = {(key.id, key.user_id) for key in body.keys if key.kind == "personal"}
+    rows = db.execute(
+        select(ApiKey.id, ApiKey.user_id, ApiKey.name).where(
+            tuple_(ApiKey.id, ApiKey.user_id).in_(personal_ids)
+        )
+    ).all()
+    names = {(row.id, row.user_id, "personal"): row.name for row in rows}
+    if is_admin and any(key.kind == "managed" for key in body.keys):
+        try:
+            managed_names = {key.key_id: key.name for key in managed_api_keys.metadata()}
+        except ManagedApiKeyConfigurationError as exc:
+            raise HTTPException(status_code=503, detail="Managed key metadata unavailable") from exc
+        for key in body.keys:
+            if key.kind == "managed" and key.id in managed_names:
+                names[(key.id, key.user_id, key.kind)] = managed_names[key.id]
+    result = [
+        UsageKeyMetadata(**key.model_dump(), name=names[(key.id, key.user_id, key.kind)])
+        for key in body.keys
+        if (key.id, key.user_id, key.kind) in names
+    ]
+    return JSONResponse(
+        content=[key.model_dump() for key in result], headers={"Cache-Control": "no-store"}
+    )
 
 
 @router.get("/validate/neurwerk")

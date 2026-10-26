@@ -62,6 +62,14 @@ class ManagedApiKeyValidator:
                 return verifier.key
         return None
 
+    def metadata(self) -> list[ManagedApiKey]:
+        """Return public descriptors only, never secret verifiers."""
+        return [
+            loaded.key
+            for slot, grant_file, verifier_file in self._files
+            if (loaded := self._load_slot(slot, grant_file, verifier_file)) is not None
+        ]
+
     @staticmethod
     def _load_slot(slot: str, grant_file: str, verifier_file: str) -> _ManagedApiKeyVerifier | None:
         if not grant_file and not verifier_file:
