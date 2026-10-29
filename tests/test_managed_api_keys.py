@@ -76,6 +76,20 @@ def test_validator_rejects_legacy_combined_descriptor(tmp_path: Path) -> None:
         ).match("secret")
 
 
+def test_validator_rejects_legacy_provider_grant(tmp_path: Path) -> None:
+    grant = tmp_path / "primary.json"
+    verifier = tmp_path / "primary.sha256"
+    write_grant(grant)
+    value = json.loads(grant.read_text())
+    value["permissions"].append("provider:example:company-use")
+    grant.write_text(json.dumps(value))
+    write_verifier(verifier, "synthetic-key")
+    with pytest.raises(ManagedApiKeyConfigurationError):
+        ManagedApiKeyValidator(
+            [ManagedRegistration(grant_file=str(grant), verifier_file=str(verifier))]
+        ).match("synthetic-key")
+
+
 def test_validator_accepts_multiple_registrations_during_rotation(tmp_path: Path) -> None:
     assert ManagedApiKeyValidator([]).match("old-key") is None
     primary_grant = tmp_path / "primary.json"
@@ -153,8 +167,9 @@ def test_keycloak_client_caches_current_entitlements(monkeypatch: pytest.MonkeyP
                 json=[
                     {"name": "llm:invoke"},
                     {"name": "application:assistant:invoke"},
+                    {"name": "provider:example:global-use"},
                     {"name": "provider:example:company-use"},
-                    {"name": "provider:*:company-use"},
+                    {"name": "provider:*:global-use"},
                     {"name": "ignored"},
                 ],
             )
@@ -174,7 +189,7 @@ def test_keycloak_client_caches_current_entitlements(monkeypatch: pytest.MonkeyP
     assert (
         first.permissions
         == second.permissions
-        == frozenset({"llm:invoke", "application:assistant:invoke", "provider:example:company-use"})
+        == frozenset({"llm:invoke", "application:assistant:invoke", "provider:example:global-use"})
     )
     assert first.groups == second.groups == frozenset({"/team"})
     assert first.account_email == second.account_email == "owner@example.com"

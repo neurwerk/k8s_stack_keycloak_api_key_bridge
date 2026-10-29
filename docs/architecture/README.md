@@ -12,7 +12,7 @@
 | AgentGateway | Uses bridge decisions for API-key authentication and enforces the permissions required by the selected route and destination. |
 | Base and selected add-ons | Provision Keycloak clients, database access, Secret delivery, managed registrations, and gateway policies. |
 
-The bridge does not assign Keycloak roles or select gateway routes. A successful key validation can return an empty permission list; it is not permission to invoke any destination. The permission syntax is limited by [`lib/permissions.py`](../../src/keycloak_api_key_bridge/lib/permissions.py) to `llm:invoke`, `model:<id>:invoke`, `mcp:<id>:invoke`, `application:<id>:invoke`, and `provider:<id>:company-use`.
+The bridge does not assign Keycloak roles or select gateway routes. A successful key validation can return an empty permission list; it is not permission to invoke any destination. The permission syntax is limited by [`lib/permissions.py`](../../src/keycloak_api_key_bridge/lib/permissions.py) to `llm:invoke`, `model:<id>:invoke`, `mcp:<id>:invoke`, `application:<id>:invoke`, and `provider:<id>:global-use`.
 
 ## Personal-key lifecycle
 

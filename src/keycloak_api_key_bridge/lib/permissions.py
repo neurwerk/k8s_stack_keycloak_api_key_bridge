@@ -7,7 +7,7 @@ import re
 _RESOURCE_ID = r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}"
 _PERMISSION_PATTERN = re.compile(
     rf"^(?:llm:invoke|(?:model|mcp|application):{_RESOURCE_ID}:invoke"
-    rf"|provider:{_RESOURCE_ID}:company-use)$"
+    rf"|provider:{_RESOURCE_ID}:global-use)$"
 )
 
 

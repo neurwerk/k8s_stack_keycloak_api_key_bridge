@@ -670,7 +670,7 @@ def test_explicit_validation_preserves_owner_grants_and_revocation(
         "llm:invoke",
         "mcp:brave:invoke",
         "application:assistant/v1.0:invoke",
-        "provider:example:company-use",
+        "provider:example:global-use",
     ]
     rights = frozenset([*grant, "model:other:invoke"])
     client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
@@ -711,13 +711,13 @@ def test_explicit_validation_preserves_owner_grants_and_revocation(
 
     # New user rights cannot expand the stored grant; removed rights take effect.
     client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
-        rights | {"provider:added-later:company-use"}, frozenset()
+        rights | {"provider:added-later:global-use"}, frozenset()
     )
     assert client.request(method, f"/validate/{mode}", headers=headers).json()[
         "permissions"
     ] == sorted(grant)
     client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
-        rights - {"provider:example:company-use"}, frozenset()
+        rights - {"provider:example:global-use"}, frozenset()
     )
     assert client.request(method, f"/validate/{mode}", headers=headers).json()[
         "permissions"
@@ -744,6 +744,28 @@ def test_explicit_validation_preserves_owner_grants_and_revocation(
     assert expired.status_code == 401
     assert expired.json()["detail"] == "Invalid or expired key"
     assert "x-agentgateway-auth-context" not in expired.headers
+
+
+def test_persisted_legacy_grants_never_authorize_global_use(client: TestClient) -> None:
+    legacy = "provider:example:company-use"
+    client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
+        frozenset({"llm:invoke", legacy, "provider:example:global-use"}), frozenset()
+    )
+    rejected = client.post("/api_keys", json={"name": "old", "permissions": [legacy]})
+    assert rejected.status_code == 422
+    with client.app.state.db_factory() as session:
+        _, key = ApiKey.create_key(
+            session,
+            name="historical",
+            user_id="user-a",
+            permissions=["llm:invoke", legacy],
+            validity_days=30,
+        )
+    response = client.get(
+        "/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {key}"}
+    )
+    assert response.status_code == 200
+    assert response.json()["permissions"] == ["llm:invoke"]
 
 
 @pytest.mark.parametrize("mode", ["neurwerk", "proxy"])
@@ -869,7 +891,7 @@ def test_proxy_validation_bounds_encoded_input_before_decoding(
 
 @pytest.mark.parametrize(
     "permission",
-    ["model:restricted:invoke", "application:restricted:invoke", "provider:restricted:company-use"],
+    ["model:restricted:invoke", "application:restricted:invoke", "provider:restricted:global-use"],
 )
 def test_create_rejects_permissions_not_in_live_entitlements(
     client: TestClient, permission: str
@@ -1015,13 +1037,13 @@ def test_create_requires_bounded_expiry(client: TestClient) -> None:
         pytest.param(["invalid:permission"], id="invalid-namespace"),
         pytest.param(["llm:invoke", "llm:invoke"], id="duplicate"),
         pytest.param(["application:*:invoke"], id="application-wildcard"),
-        pytest.param(["provider:*:company-use"], id="provider-wildcard"),
-        pytest.param(["application:example:company-use"], id="wrong-application-operation"),
+        pytest.param(["provider:*:global-use"], id="provider-wildcard"),
+        pytest.param(["application:example:global-use"], id="wrong-application-operation"),
         pytest.param(["provider:example:invoke"], id="wrong-provider-operation"),
         pytest.param(["application::invoke"], id="empty-application"),
-        pytest.param(["provider:/example:company-use"], id="invalid-provider-start"),
+        pytest.param(["provider:/example:global-use"], id="invalid-provider-start"),
         pytest.param([f"application:{'a' * 129}:invoke"], id="oversized-application"),
-        pytest.param([f"provider:{'a' * 129}:company-use"], id="oversized-provider"),
+        pytest.param([f"provider:{'a' * 129}:global-use"], id="oversized-provider"),
     ],
 )
 def test_create_requires_an_explicit_valid_non_empty_grant(
@@ -1090,7 +1112,7 @@ def test_permissions_returns_only_sorted_current_agentgateway_permissions(
         "llm:invoke",
         "mcp:brave:invoke",
         f"application:{'a' * 128}:invoke",
-        f"provider:{'b' * 128}:company-use",
+        f"provider:{'b' * 128}:global-use",
     ]
     client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
         frozenset([*permissions, "not-a-permission"]), frozenset()

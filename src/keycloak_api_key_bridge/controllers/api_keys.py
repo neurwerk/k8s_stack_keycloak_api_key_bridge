@@ -533,7 +533,11 @@ def _validate_key(
         missing_status=401,
         jwks_cache=cache,
     )
-    permissions = sorted(set(key["permissions"]).intersection(entitlements.permissions))
+    permissions = sorted(
+        permission
+        for permission in set(key["permissions"]).intersection(entitlements.permissions)
+        if is_valid_permission(permission)
+    )
     return _decision_response(
         credential_id=key["id"],
         credential_kind="user_api_key",
@@ -603,7 +607,11 @@ def _managed_key_response(
         missing_status=401,
         jwks_cache=jwks_cache,
     )
-    permissions = sorted(set(managed_key.permissions).intersection(entitlements.permissions))
+    permissions = sorted(
+        permission
+        for permission in set(managed_key.permissions).intersection(entitlements.permissions)
+        if is_valid_permission(permission)
+    )
     return _decision_response(
         credential_id=managed_key.key_id,
         credential_kind="managed_api_key",
