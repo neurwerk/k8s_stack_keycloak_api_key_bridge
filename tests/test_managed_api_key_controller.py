@@ -16,7 +16,7 @@ from keycloak_api_key_bridge.controllers.api_keys import CurrentUser, get_curren
 from keycloak_api_key_bridge.lib.keycloak import PrincipalEntitlements
 from keycloak_api_key_bridge.main import create_app
 
-_GRANT = ["application:assistant:invoke", "llm:invoke", "provider:example:company-use"]
+_GRANT = ["application:assistant:invoke", "llm:invoke", "provider:example:global-use"]
 
 
 @pytest.fixture(autouse=True)
