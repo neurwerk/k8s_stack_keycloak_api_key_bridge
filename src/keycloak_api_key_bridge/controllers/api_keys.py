@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 import json
 import logging
 import re
@@ -179,20 +178,18 @@ def gateway_caller_permissions(
     approved_clients = request.app.state.gateway_caller_oidc_clients_by_binding.get(body.binding_id)
     if approved_clients is None:
         raise HTTPException(status_code=403, detail="Unknown or disabled discovery binding")
-    if "x-neurwerk-authorization" in request.headers:
-        credential = _dedicated_api_key(request, "neurwerk")
-        try:
-            decision = _validate_key(request, credential, db, kc, managed_api_keys)
-            return {"permissions": json.loads(bytes(decision.body))["permissions"]}
-        except HTTPException as exc:
-            if exc.status_code != 401 or exc.detail != "Invalid or expired key":
-                raise
-        authorization = f"Bearer {credential}"
-    else:
-        values = request.headers.getlist("authorization")
-        authorization = values[0] if len(values) == 1 else None
+    credential = _dedicated_api_key(request, "neurwerk")
+    try:
+        decision = _validate_key(request, credential, db, kc, managed_api_keys)
+        return {"permissions": json.loads(bytes(decision.body))["permissions"]}
+    except HTTPException as exc:
+        if exc.status_code != 401 or exc.detail != "Invalid or expired key":
+            raise
+    authorization = f"Bearer {credential}"
     client_id = request.app.state.agentgateway_client_id
     payload = _verified_token(request, authorization, client_id)
+    if payload.get("typ") != "Bearer":
+        raise HTTPException(status_code=401, detail="An access token is required")
     if not isinstance(payload.get("sub"), str) or not payload["sub"]:
         raise HTTPException(status_code=401, detail="Invalid gateway identity")
     azp = payload.get("azp")
@@ -441,7 +438,7 @@ def validate_neurwerk_key(
     kc: KeycloakClient | None = Depends(get_kc_client),
     managed_api_keys: ManagedApiKeyValidator = Depends(get_managed_api_keys),
 ) -> JSONResponse:
-    """Validate only the dedicated Neurwerk bearer key, without credential fallback."""
+    """Validate the normalized internal bearer key, without credential fallback."""
     return _validation_response(request, db, kc, managed_api_keys, mode="neurwerk")
 
 
@@ -523,9 +520,7 @@ def _validate_key(
 
     key = ApiKey.get_key(db, key_value)
     if key is None:
-        logger.warning(
-            "Validation failed for unknown credential hash=%s", _key_hash_prefix(key_value)
-        )
+        logger.warning("Validation failed for unknown credential")
         raise HTTPException(status_code=401, detail="Invalid or expired key")
     entitlements = _entitlements_or_error(
         kc,
@@ -552,18 +547,26 @@ def _validate_key(
 
 
 def _dedicated_api_key(request: Request, mode: Literal["neurwerk", "proxy"]) -> str:
-    """Read exactly one bounded identity header, rejecting ambiguous encodings."""
+    """Consume the internal identity header; ignored inputs never supply identity."""
     header_name, expected_scheme = (
-        ("x-neurwerk-authorization", "bearer")
-        if mode == "neurwerk"
-        else ("proxy-authorization", "basic")
+        ("authorization", "bearer") if mode == "neurwerk" else ("proxy-authorization", "basic")
     )
     values = request.headers.getlist(header_name)
+    for ignored in (
+        "x-neurwerk-authorization",
+        "x-neurwerk-credential-mode",
+        "authorization-neurwerk",
+    ):
+        if ignored in request.headers:
+            logger.warning("Ignoring header %s", ignored)
     invalid = HTTPException(status_code=401, detail="Invalid authentication credentials")
     if len(values) != 1 or len(values[0]) > _MAX_AUTHORIZATION_HEADER_LENGTH:
+        if values:
+            logger.warning("Ignoring header %s", header_name)
         raise invalid
     match = _AUTHORIZATION_PATTERN.fullmatch(values[0])
     if match is None or match[1].lower() != expected_scheme:
+        logger.warning("Ignoring header %s", header_name)
         raise invalid
     token = match[2]
     if mode == "neurwerk":
@@ -672,8 +675,3 @@ def _decision_response(
         },
         headers={"x-agentgateway-auth-context": auth_context},
     )
-
-
-def _key_hash_prefix(key_value: str) -> str:
-    """Return a non-secret correlation value for authentication-failure logs."""
-    return hashlib.sha256(key_value.encode()).hexdigest()[:12]
