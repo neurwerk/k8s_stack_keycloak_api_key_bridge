@@ -95,7 +95,7 @@ def test_usage_names_follow_gateway_identity_owner_and_current_descriptor(tmp_pa
         decision = client.get(
             "/validate/neurwerk",
             headers={
-                "X-Neurwerk-Authorization": "Bearer managed-secret",
+                "Authorization": "Bearer managed-secret",
             },
         )
         assert decision.status_code == 200
@@ -136,7 +136,7 @@ def test_usage_names_follow_gateway_identity_owner_and_current_descriptor(tmp_pa
         decision = client.get(
             "/validate/neurwerk",
             headers={
-                "X-Neurwerk-Authorization": "Bearer managed-secret",
+                "Authorization": "Bearer managed-secret",
             },
         )
         assert decision.status_code == 200
@@ -182,16 +182,16 @@ def test_managed_key_uses_its_dedicated_machine_principal(tmp_path: Path) -> Non
         response = client.get(
             "/validate/neurwerk",
             headers={
-                "X-Neurwerk-Authorization": "Bearer managed-secret",
+                "Authorization": "Bearer managed-secret",
                 "x-account-email": "creator@example.com",
             },
         )
         repeated = client.post(
-            "/validate/neurwerk", headers={"X-Neurwerk-Authorization": "Bearer managed-secret"}
+            "/validate/neurwerk", headers={"Authorization": "Bearer managed-secret"}
         )
         for method in ("GET", "POST", "DELETE"):
             for mode, header, value in (
-                ("neurwerk", "X-Neurwerk-Authorization", "Bearer managed-secret"),
+                ("neurwerk", "Authorization", "Bearer managed-secret"),
                 (
                     "proxy",
                     "Proxy-Authorization",
@@ -262,7 +262,7 @@ def test_invalid_managed_verifier_returns_generic_unavailable_error(tmp_path: Pa
     app.state.jwks_cache = AvailableJWKSCache()
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.get(
-            "/validate/neurwerk", headers={"X-Neurwerk-Authorization": "Bearer managed-secret"}
+            "/validate/neurwerk", headers={"Authorization": "Bearer managed-secret"}
         )
 
     assert response.status_code == 503

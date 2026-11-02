@@ -187,7 +187,7 @@ def test_usage_metadata_bounds_batch_size(jwt_client, size, status):
 def _dedicated_header(mode: str, key: str, username: str = "user-b") -> tuple[str, str]:
     """Build a selected identity header with a deliberately mixed-case scheme."""
     if mode == "neurwerk":
-        return "X-Neurwerk-Authorization", f"bEaReR  {key}"
+        return "Authorization", f"bEaReR  {key}"
     token = base64.b64encode(f"{username}:{key}".encode()).decode()
     return "Proxy-Authorization", f"bAsIc  {token}"
 
@@ -320,15 +320,15 @@ def test_management_jwt_rejects_missing_or_wrong_audience(
 
 def _gateway_token(azp: str, audience: str | list[str] | None = "agentgateway") -> str:
     claims = jwt.get_unverified_claims(_management_token(audience=audience, azp=azp))
+    claims["typ"] = "Bearer"
     claims["resource_access"] = {
         "agentgateway": {"roles": ["model:example:invoke", "llm:invoke", "invalid"]}
     }
     return jwt.encode(claims, _SIGNING_KEY, algorithm="RS256", headers={"kid": "test-kid"})
 
 
-@pytest.mark.parametrize("header", ["Authorization", "X-Neurwerk-Authorization"])
-def test_discovery_oidc_client_is_binding_scoped(jwt_client: TestClient, header: str) -> None:
-    headers = {header: f"Bearer {_gateway_token('external-a')}"}
+def test_discovery_oidc_client_is_binding_scoped(jwt_client: TestClient) -> None:
+    headers = {"Authorization": f"Bearer {_gateway_token('external-a')}"}
     allowed = jwt_client.post(
         "/gateway/caller-permissions", json={"binding_id": "binding-a"}, headers=headers
     )
@@ -356,6 +356,46 @@ def test_discovery_preserves_first_party_and_gateway_audience(jwt_client: TestCl
             headers=_authorization_header(_gateway_token("external-a", audience)),
         )
         assert response.status_code == 401
+
+
+@pytest.mark.parametrize("token_type", ["ID", None])
+def test_discovery_rejects_signed_non_access_tokens(jwt_client: TestClient, token_type) -> None:
+    claims = jwt.get_unverified_claims(_gateway_token("external-a"))
+    if token_type is None:
+        claims.pop("typ")
+    else:
+        claims["typ"] = token_type
+    token = jwt.encode(claims, _SIGNING_KEY, algorithm="RS256", headers={"kid": "test-kid"})
+    response = jwt_client.post(
+        "/gateway/caller-permissions",
+        json={"binding_id": "binding-a"},
+        headers=_authorization_header(token),
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("combined", [False, True])
+@pytest.mark.parametrize(
+    "header", ["Authorization", "X-Neurwerk-Authorization", "X-Neurwerk-Credential-Mode"]
+)
+def test_discovery_discards_ambiguous_header_without_identity_fallback(
+    jwt_client: TestClient, caplog: pytest.LogCaptureFixture, combined: bool, header: str
+) -> None:
+    token = _gateway_token("external-a")
+    value = f"Bearer {token}"
+    headers = (
+        [(header, f"{value}, {value}")] if combined else [(header, value), (header.lower(), value)]
+    )
+    if header != "Authorization":
+        headers.append(("Authorization", value))
+    else:
+        headers.append(("X-Neurwerk-Authorization", value))
+    response = jwt_client.post(
+        "/gateway/caller-permissions", json={"binding_id": "binding-a"}, headers=headers
+    )
+    assert response.status_code == (401 if header == "Authorization" else 200)
+    assert header.lower() in caplog.text
+    assert token not in caplog.text + response.text
 
 
 @pytest.mark.parametrize(
@@ -409,7 +449,7 @@ def test_discovery_key_keeps_grant_intersection_and_revocation(client: TestClien
         json={"name": "discovery", "permissions": ["llm:invoke"], "expires_in_days": 1},
     )
     assert created.status_code == 200
-    headers = {"X-Neurwerk-Authorization": f"Bearer {created.json()['api_key']}"}
+    headers = {"Authorization": f"Bearer {created.json()['api_key']}"}
 
     def discover() -> httpx.Response:
         return client.post(
@@ -482,8 +522,8 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
         "/validate/neurwerk",
         headers={
             "x-api-key": "unrelated-key",
-            "Authorization": "Bearer unrelated-key",
-            "X-Neurwerk-Authorization": f"Bearer {key}",
+            "X-Neurwerk-Authorization": "Bearer unrelated-key",
+            "Authorization": f"Bearer {key}",
             "Proxy-Authorization": "malformed",
             "X-Request-ID": "gateway_request-1",
         },
@@ -509,16 +549,14 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
     client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
         frozenset({"llm:invoke"}), frozenset()
     )
-    restricted = client.get(
-        "/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {key}"}
-    )
+    restricted = client.get("/validate/neurwerk", headers={"Authorization": f"Bearer {key}"})
     assert restricted.status_code == 200
     assert restricted.json()["permissions"] == ["llm:invoke"]
 
     client.app.state.kc_client.entitlements["user-a"] = PrincipalEntitlements(
         frozenset(), frozenset()
     )
-    empty = client.post("/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {key}"})
+    empty = client.post("/validate/neurwerk", headers={"Authorization": f"Bearer {key}"})
     assert empty.status_code == 200
     assert empty.json()["permissions"] == []
     for response in (validated, restricted, empty):
@@ -571,7 +609,7 @@ def test_user_key_validation_returns_grant_entitlement_intersection(client: Test
                 validity_days=1,
             )
         response = client.get(
-            "/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {boundary_key}"}
+            "/validate/neurwerk", headers={"Authorization": f"Bearer {boundary_key}"}
         )
         if size > 65536:
             assert response.status_code == 503
@@ -641,7 +679,7 @@ def test_validate_returns_current_groups_and_trusted_owner_email(
             method,
             "/validate/neurwerk?account_email=caller@example.com&user_id=user-b",
             headers={
-                "X-Neurwerk-Authorization": f"Bearer {key}",
+                "Authorization": f"Bearer {key}",
                 "x-account-email": "caller@example.com",
                 "x-agentgateway-auth-context": '{"account_email":"caller@example.com"}',
             },
@@ -688,14 +726,12 @@ def test_explicit_validation_preserves_owner_grants_and_revocation(
     other_mode = "proxy" if mode == "neurwerk" else "neurwerk"
     headers = {
         **dict([_dedicated_header(mode, key), _dedicated_header(other_mode, other_key)]),
-        "Authorization": "Bearer provider-private-token",
+        "X-Neurwerk-Authorization": "Bearer provider-private-token",
         "x-api-key": other_key,
         "x-auth-user": "user-b",
         "x-agentgateway-auth-context": '{"principal_id":"user-b"}',
     }
-    baseline = client.get(
-        "/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {key}"}
-    )
+    baseline = client.get("/validate/neurwerk", headers={"Authorization": f"Bearer {key}"})
     assert client.get("/validate", headers={"x-api-key": key}).status_code == 404
     response = client.request(method, f"/validate/{mode}", headers=headers)
     assert response.status_code == 200
@@ -761,9 +797,7 @@ def test_persisted_legacy_grants_never_authorize_global_use(client: TestClient) 
             permissions=["llm:invoke", legacy],
             validity_days=30,
         )
-    response = client.get(
-        "/validate/neurwerk", headers={"X-Neurwerk-Authorization": f"Bearer {key}"}
-    )
+    response = client.get("/validate/neurwerk", headers={"Authorization": f"Bearer {key}"})
     assert response.status_code == 200
     assert response.json()["permissions"] == ["llm:invoke"]
 
@@ -798,7 +832,7 @@ def test_explicit_validation_rejects_ambiguous_input_without_fallback(
     header, valid = _dedicated_header(mode, key)
     other_mode = "proxy" if mode == "neurwerk" else "neurwerk"
     fallback_headers = [
-        ("Authorization", f"Bearer {key}"),
+        ("X-Neurwerk-Authorization", f"Bearer {key}"),
         ("x-api-key", key),
         _dedicated_header(other_mode, key),
     ]
@@ -914,7 +948,7 @@ def test_validate_uses_401_for_disabled_principal_and_503_for_keycloak_outage(
         ("GET", {"x-request-id": "invalid id"}, "Invalid authentication credentials"),
         (
             "POST",
-            {"X-Neurwerk-Authorization": "Bearer unknown-key", "x-request-id": "gateway_request-1"},
+            {"Authorization": "Bearer unknown-key", "x-request-id": "gateway_request-1"},
             "Invalid or expired key",
         ),
     ):
@@ -939,7 +973,7 @@ def test_validate_uses_401_for_disabled_principal_and_503_for_keycloak_outage(
     response = client.get(
         "/validate/neurwerk",
         headers=[
-            ("X-Neurwerk-Authorization", f"Bearer {key}"),
+            ("Authorization", f"Bearer {key}"),
             ("x-request-id", "first"),
             ("x-request-id", "second"),
         ],
@@ -959,7 +993,7 @@ def test_validate_uses_401_for_disabled_principal_and_503_for_keycloak_outage(
     client.app.state.kc_client.failure = True
     response = client.get(
         "/validate/neurwerk",
-        headers={"X-Neurwerk-Authorization": f"Bearer {key}", "x-request-id": "x" * 65},
+        headers={"Authorization": f"Bearer {key}", "x-request-id": "x" * 65},
     )
     assert response.status_code == 503
     assert response.json() == {
@@ -1141,7 +1175,7 @@ def test_permissions_allows_only_api_key_admin_to_target_another_user(
 def test_validate_401_is_recorded_in_aggregate_metrics(client: TestClient) -> None:
     assert (
         client.get(
-            "/validate/neurwerk", headers={"X-Neurwerk-Authorization": "Bearer not-a-valid-key"}
+            "/validate/neurwerk", headers={"Authorization": "Bearer not-a-valid-key"}
         ).status_code
         == 401
     )
