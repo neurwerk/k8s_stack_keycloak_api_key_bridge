@@ -310,7 +310,7 @@ wheels = [
 
 [[package]]
 name = "keycloak-api-key-bridge"
-version = "0.12.0"
+version = "0.12.1"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
