@@ -91,12 +91,9 @@ jobs:
               printf '%s\n' "versioned image does not contain exactly one linux/amd64 manifest" >&2
               exit 1
             fi
-            docker buildx imagetools inspect "$image_ref" \
-              --format '{{json .Image}}' > "$image_file"
-          else
-            docker buildx imagetools inspect "$image_ref" \
-              --format '{{json .Image}}' > "$image_file"
           fi
+          docker buildx imagetools inspect "$image_ref" \
+            --format '{{json .Image}}' > "$image_file"
           if ! jq -e '.os == "linux" and .architecture == "amd64"' "$image_file" >/dev/null; then
             printf '%s\n' "versioned image config is not linux/amd64" >&2
             exit 1
@@ -158,12 +155,9 @@ jobs:
                 printf '%s\n' "published image does not contain exactly one linux/amd64 manifest" >&2
                 exit 1
               fi
-              docker buildx imagetools inspect "$IMAGE_REF" \
-                --format '{{json .Image}}' > "$image_file"
-            else
-              docker buildx imagetools inspect "$IMAGE_REF" \
-                --format '{{json .Image}}' > "$image_file"
             fi
+            docker buildx imagetools inspect "$IMAGE_REF" \
+              --format '{{json .Image}}' > "$image_file"
             if ! jq -e '.os == "linux" and .architecture == "amd64"' "$image_file" >/dev/null; then
               printf '%s\n' "published image config is not linux/amd64" >&2
               exit 1

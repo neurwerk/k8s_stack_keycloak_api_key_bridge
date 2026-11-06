@@ -130,23 +130,10 @@ class ApiKey(Base):
             raise
 
     @classmethod
-    def _fetch_owned_key(cls, session: Session, key_id: str, user_id: str) -> "ApiKey | None":
-        """Look up a key by id and return it only if owned by *user_id*."""
-        key = session.get(cls, key_id)
-        if key is None or key.user_id != user_id:
-            return None
-        return key
-
-    @classmethod
-    def _fetch_any_key(cls, session: Session, key_id: str) -> "ApiKey | None":
-        """Look up a key by id — no ownership check (admin use only)."""
-        return session.get(cls, key_id)
-
-    @classmethod
     def revoke_key(cls, session: Session, key_id: str, user_id: str) -> bool:
         """Revoke a key by id.  Only the key owner may revoke."""
-        key = cls._fetch_owned_key(session, key_id, user_id)
-        if key is None:
+        key = session.get(cls, key_id)
+        if key is None or key.user_id != user_id:
             return False
         session.delete(key)
         session.commit()
@@ -155,7 +142,7 @@ class ApiKey(Base):
     @classmethod
     def revoke_key_as_admin(cls, session: Session, key_id: str) -> bool:
         """Revoke a key by id — no ownership check (admin use only)."""
-        key = cls._fetch_any_key(session, key_id)
+        key = session.get(cls, key_id)
         if key is None:
             return False
         session.delete(key)
@@ -227,7 +214,7 @@ def create_engine_and_session_factory(
         connect_args["connect_timeout"] = 3
 
     engine_options: dict = {}
-    if driver == "sqlite" and database_url in {"sqlite://", "sqlite:///:memory:"}:
+    if driver == "sqlite":
         engine_options["poolclass"] = StaticPool
 
     engine = create_engine(
