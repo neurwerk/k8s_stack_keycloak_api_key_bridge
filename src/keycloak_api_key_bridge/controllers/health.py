@@ -14,7 +14,7 @@ def live_check() -> dict[str, str]:
 
 
 @router.get("/health", response_model=None)
-def health_check(request: Request) -> dict | JSONResponse:
+def health_check(request: Request) -> dict[str, str | dict[str, str]] | JSONResponse:
     """Readiness probe — verifies the database and Keycloak JWKS availability.
 
     Returns 200 when the service is ready to serve traffic, 503 otherwise.

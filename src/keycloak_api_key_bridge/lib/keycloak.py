@@ -59,7 +59,7 @@ class KeycloakClient:
         """Close pooled outbound connections during application shutdown."""
         self._client.close()
 
-    def fetch_jwks(self) -> dict:
+    def fetch_jwks(self) -> dict[str, object]:
         """Fetch the realm JWKS document."""
         url = (
             f"{self._auth.server_url.rstrip('/')}/realms/{self._auth.realm}"
@@ -196,7 +196,7 @@ class KeycloakClient:
             account_email=email if isinstance(email, str) and email.strip() else None,
         )
 
-    def _get_user(self, user_id: str) -> dict | None:
+    def _get_user(self, user_id: str) -> dict[str, object] | None:
         try:
             response = self._client.get(f"{self._base}/users/{user_id}", headers=self._headers())
         except httpx.HTTPError as exc:
