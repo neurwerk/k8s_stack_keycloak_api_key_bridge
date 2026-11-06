@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select, tuple_
 from sqlalchemy.orm import Session
 
-from keycloak_api_key_bridge.config.database import ApiKey, ApiKeyLimitError
+from keycloak_api_key_bridge.config.database import ApiKey, ApiKeyLimitError, ApiKeyMetadata
 from keycloak_api_key_bridge.config.settings import AuthInfo
 from keycloak_api_key_bridge.lib.jwks import JWKSCache
 from keycloak_api_key_bridge.lib.keycloak import (
@@ -333,13 +333,13 @@ def revoke_api_key(
     return {"detail": "Key revoked"}
 
 
-@router.get("/api_keys")
+@router.get("/api_keys", response_model=list[dict])
 def list_api_keys(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
     max_keys_per_user: Annotated[int, Depends(get_max_keys_per_user)],
     query_user_id: Annotated[str | None, Query(alias="user_id")] = None,
-) -> list[dict]:
+) -> list[ApiKeyMetadata]:
     """List a bounded set of keys for the caller or an authorized target user."""
     target_user_id, _ = _resolve_target_user_id(query_user_id, current_user)
     return ApiKey.list_keys(db, target_user_id, max_keys_per_user)

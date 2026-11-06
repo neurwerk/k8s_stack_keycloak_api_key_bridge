@@ -3,6 +3,7 @@ import secrets
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import TypedDict
 
 from sqlalchemy import (
     JSON,
@@ -61,6 +62,18 @@ class SchemaVersion(Base):
     __tablename__ = _SCHEMA_VERSION_TABLE
 
     version: Mapped[int] = mapped_column(primary_key=True)
+
+
+class ApiKeyMetadata(TypedDict):
+    id: str
+    key_prefix: str
+    name: str
+    user_id: str
+    created_by_user_id: str | None
+    created_at: str
+    permissions: list[str]
+    expires_at: str
+    revoked: bool
 
 
 class ApiKey(Base):
@@ -150,7 +163,7 @@ class ApiKey(Base):
         return True
 
     @classmethod
-    def list_keys(cls, session: Session, user_id: str, limit: int = 20) -> list[dict]:
+    def list_keys(cls, session: Session, user_id: str, limit: int = 20) -> list[ApiKeyMetadata]:
         """Return a bounded, stable list of keys for a user as dicts."""
         keys = (
             session.query(cls)
@@ -162,7 +175,7 @@ class ApiKey(Base):
         return [_key_to_dict(k) for k in keys]
 
     @classmethod
-    def get_key(cls, session: Session, key_value: str) -> dict | None:
+    def get_key(cls, session: Session, key_value: str) -> ApiKeyMetadata | None:
         """Look up a key value and return its info dict if valid."""
         key = session.query(cls).filter(cls.key_hash == _hash_key(key_value)).one_or_none()
         if key is None or key.revoked:
@@ -177,7 +190,7 @@ class ApiKey(Base):
         return _key_to_dict(key)
 
 
-def _key_to_dict(key: ApiKey) -> dict:
+def _key_to_dict(key: ApiKey) -> ApiKeyMetadata:
     return {
         "id": key.id,
         "key_prefix": key.key_prefix,
