@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.verify_release_tag import PROJECT_FILE, load_project_version, main, verify_release_tag
+from scripts.verify_release_tag import PROJECT_FILE, load_project_metadata, main, verify_release_tag
 
 
 def _write_release_files(
@@ -47,7 +47,8 @@ def test_release_tag_rejects_lock_version_mismatch(tmp_path: Path) -> None:
 
 
 def test_release_tag_cli_accepts_current_version(capsys: pytest.CaptureFixture[str]) -> None:
-    tag = f"v{load_project_version(PROJECT_FILE)}"
+    _, version = load_project_metadata(PROJECT_FILE)
+    tag = f"v{version}"
 
     assert main([tag]) == 0
     assert capsys.readouterr().out == f"release tag matches pyproject.toml and uv.lock: {tag}\n"

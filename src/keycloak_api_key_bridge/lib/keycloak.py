@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -13,8 +12,6 @@ import httpx
 
 from keycloak_api_key_bridge.config.settings import AuthInfo
 from keycloak_api_key_bridge.lib.permissions import is_valid_permission
-
-logger = logging.getLogger(__name__)
 
 
 class KeycloakUnavailableError(RuntimeError):
@@ -286,6 +283,6 @@ def _decode_jwt_expiry(token: str) -> float:
         encoded += "=" * ((4 - len(encoded) % 4) % 4)
         payload = json.loads(base64.urlsafe_b64decode(encoded))
         expiry = float(payload["exp"])
-    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    except (IndexError, KeyError, TypeError, ValueError):
         return 0.0
     return expiry

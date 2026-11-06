@@ -28,11 +28,6 @@ def load_project_metadata(project_file: Path) -> tuple[str, str]:
     return name, version
 
 
-def load_project_version(project_file: Path) -> str:
-    """Read the static project version."""
-    return load_project_metadata(project_file)[1]
-
-
 def load_lock_version(lock_file: Path, project_name: str) -> str:
     """Read the version of the editable root package from uv.lock."""
     with lock_file.open("rb") as file:
